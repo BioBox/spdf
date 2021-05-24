@@ -4,10 +4,10 @@ OBJECTS = $(SOURCES:.cc=.o)
 CXXFLAGS ?= -Wall -O0 -g
 
 lpdf: $(OBJECTS)
-	$(CXX) $(OBJECTS) -o $@
+	$(CXX) -lpoppler $(OBJECTS) -o $@
 
 %.o: %.cc
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -I/usr/include/poppler -c $< -o $@
 
 clean:
 	rm -f lpdf $(OBJECTS)
