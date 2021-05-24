@@ -14,7 +14,11 @@
 #include <poppler/GlobalParams.h>
 #include <poppler/PDFDoc.h>
 #include <poppler/Page.h>
+#include <poppler/SplashOutputDev.h>
 #include <poppler/goo/GooString.h>
+#include <poppler/splash/SplashBitmap.h>
+
+#include "rectangle.h"
 
 using namespace std;
 
@@ -42,6 +46,9 @@ struct AppState {
 
 	Display *display = NULL;
 	Window main;
+	Rectangle main_pos;
+	Pixmap pdf = None;
+	Rectangle pdf_pos;
 };
 
 struct SetupXRet {
@@ -88,8 +95,87 @@ static SetupXRet setup_x(unsigned width, unsigned height, const string &file_nam
 
 static void cleanup_x(const AppState &st)
 {
+	if (st.pdf != None)
+		XFreePixmap(st.display, st.pdf);
 	if (st.display != NULL)
 		XCloseDisplay(st.display);
+}
+
+struct PdfRenderConf {
+	double dpi;
+	Rectangle pos;
+};
+
+PdfRenderConf get_pdf_render_conf(Rectangle p, const Page *page)
+{
+	auto rect   = page->getCropBox();
+	auto width  = rect->x2 - rect->x1;
+	auto height = rect->y2 - rect->y1;
+
+	int x, y, w, h;
+	double dpi;
+	if (double(p.width) / double(p.height) > width / height)
+	{
+		h   = p.height;
+		dpi = double(p.height) * 72.0 / height;
+		w   = width * dpi / 72.0;
+
+		y = 0;
+		x = (p.width - w) / 2;
+	}
+	else {
+		w   = p.width;
+		dpi = double(p.width) * 72.0 / width;
+		h   = height * dpi / 72.0;
+
+		x = 0;
+		y = (p.height - h) / 2;
+	}
+	return {dpi, {x, y, w, h}};
+}
+
+static Pixmap render_pdf_page_to_pixmap(const AppState &st, const PdfRenderConf &prc)
+{
+	SplashColor paper{0xff, 0xff, 0xff};
+
+	SplashOutputDev sdev(splashModeXBGR8, 4, false, paper);
+	sdev.setFontAntialias(true);
+	sdev.setVectorAntialias(true);
+
+	sdev.startDoc(st.doc.get());
+	st.doc->displayPage(&sdev, st.page_num, prc.dpi, prc.dpi, st.page->getRotate(),
+		false, true, false);
+
+	SplashBitmap *img = sdev.getBitmap();
+
+	auto xim = XCreateImage(st.display,
+		DefaultVisual(st.display, DefaultScreen(st.display)), 24, ZPixmap, 0,
+		(char*)img->getDataPtr(), img->getWidth(), img->getHeight(), 32, 0);
+
+	Pixmap pxm = XCreatePixmap(st.display,
+		DefaultRootWindow(st.display), img->getWidth(), img->getHeight(),
+		DefaultDepth(st.display, DefaultScreen(st.display)));
+
+	XPutImage(st.display, pxm,
+		DefaultGC(st.display, DefaultScreen(st.display)),
+		xim, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+
+	xim->data = NULL;
+	XDestroyImage(xim);
+
+	return pxm;
+}
+
+static void copy_pixmap_on_expose_event(const AppState &st, const XExposeEvent &e)
+{
+	Rectangle dirty = intersect({e.x, e.y, e.width, e.height}, st.pdf_pos);
+	if (is_invalid(dirty))
+		return;
+
+	XCopyArea(st.display, st.pdf, st.main,
+		DefaultGC(st.display, DefaultScreen(st.display)),
+		dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y,
+		dirty.width, dirty.height, dirty.x, dirty.y);
 }
 
 int main(int argc, char **argv)
@@ -121,6 +207,39 @@ int main(int argc, char **argv)
 		while (true)
 		{
 			XNextEvent(st.display, &event);
+
+			if (event.type == Expose)
+			{
+				if (st.pdf == None)
+				{
+					auto prc = get_pdf_render_conf(st.main_pos, st.page);
+
+					st.pdf = render_pdf_page_to_pixmap(st, prc);
+					st.pdf_pos = prc.pos;
+				}
+				copy_pixmap_on_expose_event(st, event.xexpose);
+			}
+
+			if (event.type == ConfigureNotify)
+			{
+				if (st.main_pos.width != event.xconfigure.width ||
+					st.main_pos.height != event.xconfigure.height)
+				{
+					st.main_pos = {
+						event.xconfigure.x,
+						event.xconfigure.y,
+						event.xconfigure.width,
+						event.xconfigure.height
+					};
+
+					XClearWindow(st.display, st.main);
+					if (st.pdf != None)
+					{
+						XFreePixmap(st.display, st.pdf);
+						st.pdf = None;
+					}
+				}
+			}
 
 			if (event.type == KeyPress)
 			{
