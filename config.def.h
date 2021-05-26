@@ -10,6 +10,10 @@ static const char *bg_color = "Gray50";
  * Keysym can be any keysym from /usr/include/X11/keysymdef.h.
  */
 static Shortcut shortcuts[] = {
-	{AnyMask,   XK_q,      QUIT},
-	{EmptyMask, XK_Escape, QUIT}
+	{AnyMask,     XK_q,         QUIT},
+	{EmptyMask,   XK_Escape,    QUIT},
+	{ControlMask, XK_Page_Down, NEXT},
+	{ControlMask, XK_Page_Up,   PREV},
+	{ControlMask, XK_Home,      FIRST},
+	{ControlMask, XK_End,       LAST}
 };

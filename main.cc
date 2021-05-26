@@ -26,7 +26,11 @@ using namespace std;
 #define EmptyMask 0
 
 enum Action {
-	QUIT
+	QUIT,
+	NEXT,
+	PREV,
+	FIRST,
+	LAST
 };
 
 struct Shortcut {
@@ -48,7 +52,7 @@ struct AppState {
 	Window main;
 	Rectangle main_pos;
 	Pixmap pdf = None;
-	Rectangle pdf_pos;
+	Rectangle pdf_pos{0, 0, 0, 0};
 };
 
 struct SetupXRet {
@@ -166,8 +170,19 @@ static Pixmap render_pdf_page_to_pixmap(const AppState &st, const PdfRenderConf 
 	return pxm;
 }
 
-static void copy_pixmap_on_expose_event(const AppState &st, const XExposeEvent &e)
+static void copy_pixmap_on_expose_event(const AppState &st, const Rectangle &prev,
+	const XExposeEvent &e)
 {
+	if (st.pdf_pos != prev)
+	{
+		auto diff = subtract(prev, st.pdf_pos);
+		for (size_t i = 0; i < diff.size(); ++i)
+		{
+			XClearArea(st.display, st.main, diff[i].x, diff[i].y,
+				diff[i].width, diff[i].height, False);
+		}
+	}
+
 	Rectangle dirty = intersect({e.x, e.y, e.width, e.height}, st.pdf_pos);
 	if (is_invalid(dirty))
 		return;
@@ -176,6 +191,33 @@ static void copy_pixmap_on_expose_event(const AppState &st, const XExposeEvent &
 		DefaultGC(st.display, DefaultScreen(st.display)),
 		dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y,
 		dirty.width, dirty.height, dirty.x, dirty.y);
+}
+
+static void force_render_page(AppState &st)
+{
+	if (st.pdf != None)
+	{
+		XFreePixmap(st.display, st.pdf);
+		st.pdf = None;
+	}
+
+	XWindowAttributes attrs;
+	XGetWindowAttributes(st.display, st.main, &attrs);
+
+	XEvent e;
+	e.type = ConfigureNotify;
+	e.xconfigure.x = attrs.x;
+	e.xconfigure.y = attrs.y;
+	e.xconfigure.width  = attrs.width;
+	e.xconfigure.height = attrs.height;
+	XSendEvent(st.display, st.main, False, StructureNotifyMask, &e);
+
+	e.type = Expose;
+	e.xexpose.x = 0;
+	e.xexpose.y = 0;
+	e.xexpose.width  = attrs.width;
+	e.xexpose.height = attrs.height;
+	XSendEvent(st.display, st.main, False, ExposureMask, &e);
 }
 
 int main(int argc, char **argv)
@@ -210,6 +252,7 @@ int main(int argc, char **argv)
 
 			if (event.type == Expose)
 			{
+				auto prev = st.pdf_pos;
 				if (st.pdf == None)
 				{
 					auto prc = get_pdf_render_conf(st.main_pos, st.page);
@@ -217,7 +260,7 @@ int main(int argc, char **argv)
 					st.pdf = render_pdf_page_to_pixmap(st, prc);
 					st.pdf_pos = prc.pos;
 				}
-				copy_pixmap_on_expose_event(st, event.xexpose);
+				copy_pixmap_on_expose_event(st, prev, event.xexpose);
 			}
 
 			if (event.type == ConfigureNotify)
@@ -259,6 +302,42 @@ int main(int argc, char **argv)
 					{
 						if (sc->action == QUIT)
 							goto endloop;
+
+						auto render_page_lambda = [&]() {
+							st.page = st.doc->getPage(st.page_num);
+							(!st.page) && error("Cannot create page: " + to_string(st.page_num) + ".");
+							force_render_page(st);
+						};
+
+						if (sc->action == NEXT)
+						{
+							if (st.page_num < st.doc->getNumPages())
+							{
+								++st.page_num;
+								render_page_lambda();
+							}
+						}
+
+						if (sc->action == PREV)
+						{
+							if (st.page_num > 1)
+							{
+								--st.page_num;
+								render_page_lambda();
+							}
+						}
+
+						if (sc->action == FIRST)
+						{
+							st.page_num = 1;
+							render_page_lambda();
+						}
+
+						if (sc->action == LAST)
+						{
+							st.page_num = st.doc->getNumPages();
+							render_page_lambda();
+						}
 					}
 				}
 			}
