@@ -30,7 +30,9 @@ enum Action {
 	NEXT,
 	PREV,
 	FIRST,
-	LAST
+	LAST,
+	FIT_PAGE,
+	FIT_WIDTH
 };
 
 struct Shortcut {
@@ -47,6 +49,7 @@ struct AppState {
 	unique_ptr<PDFDoc> doc;
 	Page *page = NULL;
 	int page_num;
+	bool fit_page;
 
 	Display *display = NULL;
 	Window main;
@@ -110,7 +113,7 @@ struct PdfRenderConf {
 	Rectangle pos;
 };
 
-PdfRenderConf get_pdf_render_conf(Rectangle p, const Page *page)
+PdfRenderConf get_pdf_render_conf(bool fit_page, Rectangle p, const Page *page)
 {
 	auto rect   = page->getCropBox();
 	auto width  = rect->x2 - rect->x1;
@@ -118,14 +121,25 @@ PdfRenderConf get_pdf_render_conf(Rectangle p, const Page *page)
 
 	int x, y, w, h;
 	double dpi;
-	if (double(p.width) / double(p.height) > width / height)
+	if (fit_page)
 	{
-		h   = p.height;
-		dpi = double(p.height) * 72.0 / height;
-		w   = width * dpi / 72.0;
+		if (double(p.width) / double(p.height) > width / height)
+		{
+			h   = p.height;
+			dpi = double(p.height) * 72.0 / height;
+			w   = width * dpi / 72.0;
 
-		y = 0;
-		x = (p.width - w) / 2;
+			y = 0;
+			x = (p.width - w) / 2;
+		}
+		else {
+			w   = p.width;
+			dpi = double(p.width) * 72.0 / width;
+			h   = height * dpi / 72.0;
+
+			x = 0;
+			y = (p.height - h) / 2;
+		}
 	}
 	else {
 		w   = p.width;
@@ -133,7 +147,13 @@ PdfRenderConf get_pdf_render_conf(Rectangle p, const Page *page)
 		h   = height * dpi / 72.0;
 
 		x = 0;
-		y = (p.height - h) / 2;
+		if (double(p.width) / double(p.height) <= width / height)
+		{
+			y = (p.height - h) / 2;
+		}
+		else {
+			y = 0;
+		}
 	}
 	return {dpi, {x, y, w, h}};
 }
@@ -245,6 +265,8 @@ int main(int argc, char **argv)
 		st.display = xret.display;
 		st.main    = xret.main;
 
+		st.fit_page = true;
+
 		XEvent event;
 		while (true)
 		{
@@ -255,7 +277,7 @@ int main(int argc, char **argv)
 				auto prev = st.pdf_pos;
 				if (st.pdf == None)
 				{
-					auto prc = get_pdf_render_conf(st.main_pos, st.page);
+					auto prc = get_pdf_render_conf(st.fit_page, st.main_pos, st.page);
 
 					st.pdf = render_pdf_page_to_pixmap(st, prc);
 					st.pdf_pos = prc.pos;
@@ -302,6 +324,18 @@ int main(int argc, char **argv)
 					{
 						if (sc->action == QUIT)
 							goto endloop;
+
+						if (sc->action == FIT_PAGE && !st.fit_page)
+						{
+							st.fit_page = true;
+							force_render_page(st);
+						}
+
+						if (sc->action == FIT_WIDTH && st.fit_page)
+						{
+							st.fit_page = false;
+							force_render_page(st);
+						}
 
 						auto render_page_lambda = [&]() {
 							st.page = st.doc->getPage(st.page_num);

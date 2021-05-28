@@ -15,5 +15,7 @@ static Shortcut shortcuts[] = {
 	{ControlMask, XK_Page_Down, NEXT},
 	{ControlMask, XK_Page_Up,   PREV},
 	{ControlMask, XK_Home,      FIRST},
-	{ControlMask, XK_End,       LAST}
+	{ControlMask, XK_End,       LAST},
+	{EmptyMask,   XK_z,         FIT_PAGE},
+	{EmptyMask,   XK_w,         FIT_WIDTH}
 };
