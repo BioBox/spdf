@@ -17,5 +17,15 @@ static Shortcut shortcuts[] = {
 	{ControlMask, XK_Home,      FIRST},
 	{ControlMask, XK_End,       LAST},
 	{EmptyMask,   XK_z,         FIT_PAGE},
-	{EmptyMask,   XK_w,         FIT_WIDTH}
+	{EmptyMask,   XK_w,         FIT_WIDTH},
+	{EmptyMask,   XK_Down,      DOWN},
+	{EmptyMask,   XK_Up,        UP},
+	{EmptyMask,   XK_Page_Down, PG_DOWN},
+	{EmptyMask,   XK_Page_Up,   PG_UP}
 };
+
+/*
+ * Scrolling speed (in page fractions).
+ */
+static double arrow_scroll = 0.01;
+static double page_scroll  = 0.30;

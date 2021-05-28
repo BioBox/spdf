@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <climits>
 #include <clocale>
 #include <cstdlib>
@@ -32,7 +33,11 @@ enum Action {
 	FIRST,
 	LAST,
 	FIT_PAGE,
-	FIT_WIDTH
+	FIT_WIDTH,
+	DOWN,
+	UP,
+	PG_DOWN,
+	PG_UP
 };
 
 struct Shortcut {
@@ -50,6 +55,7 @@ struct AppState {
 	Page *page = NULL;
 	int page_num;
 	bool fit_page;
+	bool scrolling_up;
 
 	Display *display = NULL;
 	Window main;
@@ -113,7 +119,8 @@ struct PdfRenderConf {
 	Rectangle pos;
 };
 
-PdfRenderConf get_pdf_render_conf(bool fit_page, Rectangle p, const Page *page)
+PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, Rectangle p,
+	const Page *page)
 {
 	auto rect   = page->getCropBox();
 	auto width  = rect->x2 - rect->x1;
@@ -152,7 +159,10 @@ PdfRenderConf get_pdf_render_conf(bool fit_page, Rectangle p, const Page *page)
 			y = (p.height - h) / 2;
 		}
 		else {
-			y = 0;
+			if (!scrolling_up)
+				y = 0;
+			else
+				y = p.height - h;
 		}
 	}
 	return {dpi, {x, y, w, h}};
@@ -213,9 +223,9 @@ static void copy_pixmap_on_expose_event(const AppState &st, const Rectangle &pre
 		dirty.width, dirty.height, dirty.x, dirty.y);
 }
 
-static void force_render_page(AppState &st)
+static void force_render_page(AppState &st, bool clear = true)
 {
-	if (st.pdf != None)
+	if (st.pdf != None && clear)
 	{
 		XFreePixmap(st.display, st.pdf);
 		st.pdf = None;
@@ -238,6 +248,18 @@ static void force_render_page(AppState &st)
 	e.xexpose.width  = attrs.width;
 	e.xexpose.height = attrs.height;
 	XSendEvent(st.display, st.main, False, ExposureMask, &e);
+}
+
+static int get_pdf_scroll_diff(const AppState &st, double percent)
+{
+	if (st.pdf_pos.height < st.main_pos.height)
+		return 0;
+
+	int sc = st.pdf_pos.height * percent;
+	if (sc > 0)
+		return min(sc, -st.pdf_pos.y);
+
+	return -min(-sc, st.pdf_pos.height - st.main_pos.height + st.pdf_pos.y);
 }
 
 int main(int argc, char **argv)
@@ -265,7 +287,8 @@ int main(int argc, char **argv)
 		st.display = xret.display;
 		st.main    = xret.main;
 
-		st.fit_page = true;
+		st.fit_page     = true;
+		st.scrolling_up = false;
 
 		XEvent event;
 		while (true)
@@ -277,7 +300,9 @@ int main(int argc, char **argv)
 				auto prev = st.pdf_pos;
 				if (st.pdf == None)
 				{
-					auto prc = get_pdf_render_conf(st.fit_page, st.main_pos, st.page);
+					auto prc = get_pdf_render_conf(st.fit_page, st.scrolling_up,
+						st.main_pos, st.page);
+					st.scrolling_up = false;
 
 					st.pdf = render_pdf_page_to_pixmap(st, prc);
 					st.pdf_pos = prc.pos;
@@ -343,7 +368,7 @@ int main(int argc, char **argv)
 							force_render_page(st);
 						};
 
-						if (sc->action == NEXT)
+						if (sc->action == NEXT || (sc->action == PG_DOWN && st.fit_page))
 						{
 							if (st.page_num < st.doc->getNumPages())
 							{
@@ -352,7 +377,7 @@ int main(int argc, char **argv)
 							}
 						}
 
-						if (sc->action == PREV)
+						if (sc->action == PREV || (sc->action == PG_UP && st.fit_page))
 						{
 							if (st.page_num > 1)
 							{
@@ -371,6 +396,61 @@ int main(int argc, char **argv)
 						{
 							st.page_num = st.doc->getNumPages();
 							render_page_lambda();
+						}
+
+						if (sc->action == DOWN && !st.fit_page)
+						{
+							int diff = get_pdf_scroll_diff(st, -arrow_scroll);
+							if (diff != 0)
+							{
+								st.pdf_pos.y += diff;
+								force_render_page(st, false);
+							}
+						}
+
+						if (sc->action == UP && !st.fit_page)
+						{
+							int diff = get_pdf_scroll_diff(st, arrow_scroll);
+							if (diff != 0)
+							{
+								st.pdf_pos.y += diff;
+								force_render_page(st, false);
+							}
+						}
+
+						if (sc->action == PG_DOWN && !st.fit_page)
+						{
+							int diff = get_pdf_scroll_diff(st, -page_scroll);
+							if (diff != 0)
+							{
+								st.pdf_pos.y += diff;
+								force_render_page(st, false);
+							}
+							else {
+								if (st.page_num < st.doc->getNumPages())
+								{
+									++st.page_num;
+									render_page_lambda();
+								}
+							}
+						}
+
+						if (sc->action == PG_UP && !st.fit_page)
+						{
+							int diff = get_pdf_scroll_diff(st, page_scroll);
+							if (diff != 0)
+							{
+								st.pdf_pos.y += diff;
+								force_render_page(st, false);
+							}
+							else {
+								if (st.page_num > 1)
+								{
+									st.scrolling_up = true;
+									--st.page_num;
+									render_page_lambda();
+								}
+							}
 						}
 					}
 				}
