@@ -29,3 +29,4 @@ static Shortcut shortcuts[] = {
  */
 static double arrow_scroll = 0.01;
 static double page_scroll  = 0.30;
+static double mouse_scroll = 0.02;

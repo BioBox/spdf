@@ -101,7 +101,8 @@ static SetupXRet setup_x(unsigned width, unsigned height, const string &file_nam
 		PropModeReplace, (const unsigned char*)icon_name.c_str(), icon_name.size());
 
 	XMapWindow(display, main);
-	XSelectInput(display, main, KeyPressMask | StructureNotifyMask | ExposureMask);
+	XSelectInput(display, main, KeyPressMask | ButtonPressMask |
+		StructureNotifyMask | ExposureMask);
 
 	return {display, main};
 }
@@ -331,6 +332,12 @@ int main(int argc, char **argv)
 				}
 			}
 
+			auto render_page_lambda = [&]() {
+				st.page = st.doc->getPage(st.page_num);
+				(!st.page) && error("Cannot create page: " + to_string(st.page_num) + ".");
+				force_render_page(st);
+			};
+
 			if (event.type == KeyPress)
 			{
 				KeySym ksym;
@@ -361,12 +368,6 @@ int main(int argc, char **argv)
 							st.fit_page = false;
 							force_render_page(st);
 						}
-
-						auto render_page_lambda = [&]() {
-							st.page = st.doc->getPage(st.page_num);
-							(!st.page) && error("Cannot create page: " + to_string(st.page_num) + ".");
-							force_render_page(st);
-						};
 
 						if (sc->action == NEXT || (sc->action == PG_DOWN && st.fit_page))
 						{
@@ -451,6 +452,64 @@ int main(int argc, char **argv)
 									render_page_lambda();
 								}
 							}
+						}
+					}
+				}
+			}
+
+			if (event.type == ButtonPress)
+			{
+				auto button = event.xbutton.button;
+				if (button == Button4 && st.fit_page)
+				{
+					if (st.page_num > 1)
+					{
+						st.scrolling_up = true;
+						--st.page_num;
+						render_page_lambda();
+					}
+				}
+
+				if (button == Button5 && st.fit_page)
+				{
+					if (st.page_num < st.doc->getNumPages())
+					{
+						++st.page_num;
+						render_page_lambda();
+					}
+				}
+
+				if (button == Button4 && !st.fit_page)
+				{
+					int diff = get_pdf_scroll_diff(st, mouse_scroll);
+					if (diff != 0)
+					{
+						st.pdf_pos.y += diff;
+						force_render_page(st, false);
+					}
+					else {
+						if (st.page_num > 1)
+						{
+							st.scrolling_up = true;
+							--st.page_num;
+							render_page_lambda();
+						}
+					}
+				}
+
+				if (button == Button5 && !st.fit_page)
+				{
+					int diff = get_pdf_scroll_diff(st, -mouse_scroll);
+					if (diff != 0)
+					{
+						st.pdf_pos.y += diff;
+						force_render_page(st, false);
+					}
+					else {
+						if (st.page_num < st.doc->getNumPages())
+						{
+							++st.page_num;
+							render_page_lambda();
 						}
 					}
 				}
