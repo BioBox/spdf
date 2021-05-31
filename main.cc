@@ -5,6 +5,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <stack>
 #include <stdexcept>
 #include <string>
 
@@ -12,13 +13,16 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 
+#include <poppler/Annot.h>
 #include <poppler/GlobalParams.h>
+#include <poppler/Link.h>
 #include <poppler/PDFDoc.h>
 #include <poppler/Page.h>
 #include <poppler/SplashOutputDev.h>
 #include <poppler/goo/GooString.h>
 #include <poppler/splash/SplashBitmap.h>
 
+#include "coordconv.h"
 #include "rectangle.h"
 
 using namespace std;
@@ -37,7 +41,8 @@ enum Action {
 	DOWN,
 	UP,
 	PG_DOWN,
-	PG_UP
+	PG_UP,
+	BACK
 };
 
 struct Shortcut {
@@ -50,12 +55,18 @@ struct Shortcut {
 
 static bool error(const string &m) {throw runtime_error(m); return false;}
 
+struct PageAndOffset {
+	int page, offset;
+};
+
 struct AppState {
 	unique_ptr<PDFDoc> doc;
 	Page *page = NULL;
 	int page_num;
 	bool fit_page;
 	bool scrolling_up;
+	int next_pos_y = 0;
+	stack<PageAndOffset> page_stack;
 
 	Display *display = NULL;
 	Window main;
@@ -120,8 +131,8 @@ struct PdfRenderConf {
 	Rectangle pos;
 };
 
-PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, Rectangle p,
-	const Page *page)
+PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, int offset,
+	Rectangle p, const Page *page)
 {
 	auto rect   = page->getCropBox();
 	auto width  = rect->x2 - rect->x1;
@@ -161,7 +172,7 @@ PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, Rectangle p,
 		}
 		else {
 			if (!scrolling_up)
-				y = 0;
+				y = offset;
 			else
 				y = p.height - h;
 		}
@@ -263,6 +274,60 @@ static int get_pdf_scroll_diff(const AppState &st, double percent)
 	return -min(-sc, st.pdf_pos.height - st.main_pos.height + st.pdf_pos.y);
 }
 
+static bool find_page_link(AppState &st, const XButtonEvent &e)
+{
+	unique_ptr<Links> links(st.page->getLinks());
+	if (links->getNumLinks() == 0)
+		return false;
+
+	const CoordConv cc(st.page, st.pdf_pos);
+	double ex = cc.to_pdf_x(e.x);
+	double ey = cc.to_pdf_y(e.y);
+
+	for (int i = 0; i < links->getNumLinks(); ++i)
+	{
+		auto link = links->getLink(i);
+		auto rect = link->getRect();
+
+		if (ex >= rect->x1 && ex <= rect->x2 &&
+			ey >= rect->y1 && ey <= rect->y2)
+		{
+			auto action = link->getAction();
+			if (action->isOk() && action->getKind() == actionGoTo)
+			{
+				unique_ptr<LinkDest> dptr;
+				auto dest = ((LinkGoTo*)action)->getDest();
+
+				if (!dest)
+				{
+					auto name = ((LinkGoTo*)action)->getNamedDest();
+
+					dptr = st.doc->findDest(name);
+					dest = dptr.get();
+				}
+
+				if (dest)
+				{
+					int prev_page = st.page_num;
+
+					if (dest->isPageRef())
+						st.page_num = st.doc->findPage(dest->getPageRef());
+					else
+						st.page_num = dest->getPageNum();
+
+					if (prev_page != st.page_num)
+					{
+						st.page_stack.push({prev_page, st.pdf_pos.y});
+						return true;
+					}
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
 int main(int argc, char **argv)
 {
 	setlocale(LC_ALL, "");
@@ -302,8 +367,9 @@ int main(int argc, char **argv)
 				if (st.pdf == None)
 				{
 					auto prc = get_pdf_render_conf(st.fit_page, st.scrolling_up,
-						st.main_pos, st.page);
+						st.next_pos_y, st.main_pos, st.page);
 					st.scrolling_up = false;
+					st.next_pos_y   = 0;
 
 					st.pdf = render_pdf_page_to_pixmap(st, prc);
 					st.pdf_pos = prc.pos;
@@ -453,6 +519,19 @@ int main(int argc, char **argv)
 								}
 							}
 						}
+
+						if (sc->action == BACK)
+						{
+							if (!st.page_stack.empty())
+							{
+								auto elem = st.page_stack.top();
+								st.page_stack.pop();
+
+								st.page_num   = elem.page;
+								st.next_pos_y = elem.offset;
+								render_page_lambda();
+							}
+						}
 					}
 				}
 			}
@@ -511,6 +590,18 @@ int main(int argc, char **argv)
 							++st.page_num;
 							render_page_lambda();
 						}
+					}
+				}
+
+				if (button == Button1)
+				{
+					if (event.xbutton.x >= st.pdf_pos.x &&
+						event.xbutton.y >= st.pdf_pos.y &&
+						event.xbutton.x <= st.pdf_pos.x + st.pdf_pos.width &&
+						event.xbutton.y <= st.pdf_pos.y + st.pdf_pos.height)
+					{
+						if (find_page_link(st, event.xbutton))
+							render_page_lambda();
 					}
 				}
 			}

@@ -21,7 +21,8 @@ static Shortcut shortcuts[] = {
 	{EmptyMask,   XK_Down,      DOWN},
 	{EmptyMask,   XK_Up,        UP},
 	{EmptyMask,   XK_Page_Down, PG_DOWN},
-	{EmptyMask,   XK_Page_Up,   PG_UP}
+	{EmptyMask,   XK_Page_Up,   PG_UP},
+	{EmptyMask,   XK_b,         BACK}
 };
 
 /*
