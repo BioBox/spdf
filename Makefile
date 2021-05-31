@@ -1,4 +1,4 @@
-SOURCES = main.cc rectangle.cc
+SOURCES = main.cc rectangle.cc coordconv.cc
 OBJECTS = $(SOURCES:.cc=.o)
 
 CXXFLAGS ?= -Wall -O0 -g
