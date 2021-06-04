@@ -42,7 +42,8 @@ enum Action {
 	UP,
 	PG_DOWN,
 	PG_UP,
-	BACK
+	BACK,
+	RELOAD
 };
 
 struct Shortcut {
@@ -531,6 +532,17 @@ int main(int argc, char **argv)
 								st.next_pos_y = elem.offset;
 								render_page_lambda();
 							}
+						}
+
+						if (sc->action == RELOAD)
+						{
+							st.doc.reset(new PDFDoc(new GooString(file_name.c_str())));
+							(!st.doc->isOk()) && error("Error re-loading pdf file.");
+
+							if (st.page_num > st.doc->getNumPages())
+								st.page_num = 1;
+
+							render_page_lambda();
 						}
 					}
 				}
