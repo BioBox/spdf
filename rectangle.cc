@@ -49,3 +49,27 @@ bool operator==(const Rectangle &a, const Rectangle &b) {
 bool operator!=(const Rectangle &a, const Rectangle &b) {
 	return !(a == b);
 }
+
+Rectangle Rectangle::normalized() const
+{
+	auto [nx, ny, nw, nh] = *this;
+
+	if (nw < 0)
+	{
+		nw *= -1;
+		nx -= nw;
+	}
+
+	if (nh < 0)
+	{
+		nh *= -1;
+		ny -= nh;
+	}
+
+	return {nx, ny, nw, nh};
+}
+
+Rectangle Rectangle::padded(int p) const
+{
+	return {x - p, y - p, width + 2 * p, height + 2 * p};
+}

@@ -74,11 +74,17 @@ struct AppState {
 	Rectangle main_pos;
 	Pixmap pdf = None;
 	Rectangle pdf_pos{0, 0, 0, 0};
+
+	GC selection_gc;
+	Rectangle selection{0, 0, 0, 0};
+	Rectangle pdf_selection{0, 0, 0, 0};
+	bool selecting = false;
 };
 
 struct SetupXRet {
 	Display *display;
 	Window main;
+	GC selection;
 };
 
 static SetupXRet setup_x(unsigned width, unsigned height, const string &file_name)
@@ -112,11 +118,15 @@ static SetupXRet setup_x(unsigned width, unsigned height, const string &file_nam
 	XChangeProperty(display, main, wm_icon_name_atom, utf8_string_atom, 8,
 		PropModeReplace, (const unsigned char*)icon_name.c_str(), icon_name.size());
 
-	XMapWindow(display, main);
-	XSelectInput(display, main, KeyPressMask | ButtonPressMask |
-		StructureNotifyMask | ExposureMask);
+	XGCValues gcvals;
+	gcvals.function = GXinvert;
+	GC gc = XCreateGC(display, main, GCFunction, &gcvals);
 
-	return {display, main};
+	XMapWindow(display, main);
+	XSelectInput(display, main, KeyPressMask | ButtonPressMask | ButtonReleaseMask |
+		Button1MotionMask | StructureNotifyMask | ExposureMask);
+
+	return {display, main, gc};
 }
 
 static void cleanup_x(const AppState &st)
@@ -234,6 +244,18 @@ static void copy_pixmap_on_expose_event(const AppState &st, const Rectangle &pre
 		DefaultGC(st.display, DefaultScreen(st.display)),
 		dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y,
 		dirty.width, dirty.height, dirty.x, dirty.y);
+
+	const CoordConv cc(st.page, st.pdf_pos, false);
+	auto rs = st.selecting ?
+		st.selection.normalized() :
+		cc.to_screen(st.pdf_selection);
+	if (rs.width > 0 && rs.height > 0)
+	{
+		dirty = intersect({e.x, e.y, e.width, e.height}, rs);
+		if (!is_invalid(dirty))
+			XFillRectangle(st.display, st.main, st.selection_gc,
+				dirty.x, dirty.y, dirty.width, dirty.height);
+	}
 }
 
 static void force_render_page(AppState &st, bool clear = true)
@@ -260,6 +282,17 @@ static void force_render_page(AppState &st, bool clear = true)
 	e.xexpose.y = 0;
 	e.xexpose.width  = attrs.width;
 	e.xexpose.height = attrs.height;
+	XSendEvent(st.display, st.main, False, ExposureMask, &e);
+}
+
+static void send_expose(const AppState &st, const Rectangle &r)
+{
+	XEvent e;
+	e.type = Expose;
+	e.xexpose.x = r.x;
+	e.xexpose.y = r.y;
+	e.xexpose.width  = r.width;
+	e.xexpose.height = r.height;
 	XSendEvent(st.display, st.main, False, ExposureMask, &e);
 }
 
@@ -357,6 +390,8 @@ int main(int argc, char **argv)
 		st.fit_page     = true;
 		st.scrolling_up = false;
 
+		st.selection_gc = xret.selection;
+
 		XEvent event;
 		while (true)
 		{
@@ -403,6 +438,8 @@ int main(int argc, char **argv)
 				st.page = st.doc->getPage(st.page_num);
 				(!st.page) && error("Cannot create page: " + to_string(st.page_num) + ".");
 				force_render_page(st);
+				st.selection = st.pdf_selection = {0, 0, 0, 0};
+				st.selecting = false;
 			};
 
 			if (event.type == KeyPress)
@@ -613,9 +650,49 @@ int main(int argc, char **argv)
 						event.xbutton.y <= st.pdf_pos.y + st.pdf_pos.height)
 					{
 						if (find_page_link(st, event.xbutton))
+						{
 							render_page_lambda();
+						}
+						else {
+							const CoordConv cc(st.page, st.pdf_pos, false);
+							st.selection = cc.to_screen(st.pdf_selection);
+
+							// Padding needed because of float rounding errors in cc.
+							send_expose(st, st.selection.normalized().padded(5));
+
+							st.selection = {event.xbutton.x, event.xbutton.y, 0, 0};
+							st.selecting = true;
+						}
 					}
 				}
+			}
+
+			if (event.type == ButtonRelease && event.xbutton.button == Button1)
+			{
+				if (st.selecting)
+				{
+					st.selection.width  = event.xbutton.x - st.selection.x;
+					st.selection.height = event.xbutton.y - st.selection.y;
+
+					const CoordConv cc(st.page, st.pdf_pos, false);
+					st.pdf_selection = cc.to_pdf(st.selection.normalized());
+					st.selecting = false;
+				}
+			}
+
+			if (event.type == MotionNotify && st.selecting)
+			{
+				auto pr = st.selection.normalized();
+
+				st.selection.width  = event.xbutton.x - st.selection.x;
+				st.selection.height = event.xbutton.y - st.selection.y;
+
+				auto nr = st.selection.normalized();
+
+				for (auto &r : subtract(pr, nr))
+					send_expose(st, r);
+				for (auto &r : subtract(nr, pr))
+					send_expose(st, r);
 			}
 		}
 		endloop:;

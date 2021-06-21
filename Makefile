@@ -7,7 +7,7 @@ lpdf: $(OBJECTS)
 	$(CXX) -lpoppler -lX11 $(OBJECTS) -o $@
 
 %.o: %.cc config.h
-	$(CXX) $(CXXFLAGS) -I/usr/include/poppler -c $< -o $@
+	$(CXX) -std=c++17 $(CXXFLAGS) -I/usr/include/poppler -c $< -o $@
 
 config.h:
 	cp config.def.h config.h

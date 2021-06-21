@@ -6,6 +6,9 @@
 struct Rectangle {
 	int x, y;
 	int width, height;
+
+	Rectangle normalized() const;
+	Rectangle padded(int p) const;
 };
 
 Rectangle intersect(const Rectangle &a, const Rectangle &b);

@@ -6,13 +6,19 @@
 
 struct CoordConv
 {
+	CoordConv(const Page *p, const Rectangle &r, bool i);
 	CoordConv(const Page *p, const Rectangle &r);
 	double to_pdf_x(int x) const;
 	double to_pdf_y(int y) const;
+	Rectangle to_pdf(const Rectangle &r) const;
+	double to_screen_x(int x) const;
+	double to_screen_y(int y) const;
+	Rectangle to_screen(const Rectangle &r) const;
 
 private:
 	double xscale, yscale;
 	Rectangle rect;
+	bool inverty;
 };
 
 #endif
