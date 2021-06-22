@@ -23,7 +23,8 @@ static Shortcut shortcuts[] = {
 	{EmptyMask,   XK_Page_Down, PG_DOWN},
 	{EmptyMask,   XK_Page_Up,   PG_UP},
 	{EmptyMask,   XK_b,         BACK},
-	{AnyMask,     XK_r,         RELOAD}
+	{AnyMask,     XK_r,         RELOAD},
+	{ControlMask, XK_c,         COPY}
 };
 
 /*

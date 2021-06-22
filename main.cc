@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -19,6 +20,7 @@
 #include <poppler/PDFDoc.h>
 #include <poppler/Page.h>
 #include <poppler/SplashOutputDev.h>
+#include <poppler/TextOutputDev.h>
 #include <poppler/goo/GooString.h>
 #include <poppler/splash/SplashBitmap.h>
 
@@ -43,7 +45,8 @@ enum Action {
 	PG_DOWN,
 	PG_UP,
 	BACK,
-	RELOAD
+	RELOAD,
+	COPY
 };
 
 struct Shortcut {
@@ -79,6 +82,9 @@ struct AppState {
 	Rectangle selection{0, 0, 0, 0};
 	Rectangle pdf_selection{0, 0, 0, 0};
 	bool selecting = false;
+
+	unique_ptr<GooString> primary;
+	unique_ptr<GooString> clipboard;
 };
 
 struct SetupXRet {
@@ -362,6 +368,33 @@ static bool find_page_link(AppState &st, const XButtonEvent &e)
 	return false;
 }
 
+static void copy_text(AppState &st, bool primary)
+{
+	TextOutputDev tdev(nullptr, false, 0, false, false);
+
+	st.doc->displayPage(&tdev, st.page_num, 72, 72, st.page->getRotate(), false, true, false);
+
+	const CoordConv cc(st.page, st.pdf_pos, false);
+
+	auto sr = st.selection.normalized();
+	auto x1 = cc.to_pdf_x(sr.x);
+	auto y1 = cc.to_pdf_y(sr.y);
+
+	auto x2 = cc.to_pdf_x(sr.x + sr.width);
+	auto y2 = cc.to_pdf_y(sr.y + sr.height);
+
+	if (primary)
+	{
+		st.primary.reset(tdev.getText(x1, y1, x2, y2));
+		XSetSelectionOwner(st.display, XA_PRIMARY, st.main, CurrentTime);
+	}
+	else {
+		st.clipboard.reset(tdev.getText(x1, y1, x2, y2));
+		XSetSelectionOwner(st.display, XInternAtom(st.display, "CLIPBOARD", 0),
+			st.main, CurrentTime);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	setlocale(LC_ALL, "");
@@ -581,6 +614,12 @@ int main(int argc, char **argv)
 
 							render_page_lambda();
 						}
+
+						if (sc->action == COPY)
+						{
+							if (st.pdf_selection.width > 0 && st.pdf_selection.height > 0)
+								copy_text(st, false);
+						}
 					}
 				}
 			}
@@ -677,6 +716,8 @@ int main(int argc, char **argv)
 					const CoordConv cc(st.page, st.pdf_pos, false);
 					st.pdf_selection = cc.to_pdf(st.selection.normalized());
 					st.selecting = false;
+
+					copy_text(st, true);
 				}
 			}
 
@@ -693,6 +734,53 @@ int main(int argc, char **argv)
 					send_expose(st, r);
 				for (auto &r : subtract(nr, pr))
 					send_expose(st, r);
+			}
+
+			if (event.type == SelectionRequest)
+			{
+				Atom targets_atom     = XInternAtom(st.display, "TARGETS", False);
+				Atom utf8_string_atom = XInternAtom(st.display, "UTF8_STRING", False);
+				Atom clipboard_atom   = XInternAtom(st.display, "CLIPBOARD", False);
+
+				auto xselreq = event.xselectionrequest;
+
+				XEvent e;
+				e.type = SelectionNotify;
+				e.xselection.requestor = xselreq.requestor;
+				e.xselection.selection = xselreq.selection;
+				e.xselection.target    = xselreq.target;
+				e.xselection.time      = xselreq.time;
+				e.xselection.property  = None;
+
+				if (xselreq.target == targets_atom)
+				{
+					XChangeProperty(xselreq.display, xselreq.requestor,
+						xselreq.property, XA_ATOM, 32, PropModeReplace,
+						(unsigned char*)&utf8_string_atom, 1);
+					e.xselection.property = xselreq.property;
+				}
+
+				/*
+				 * XA_STRING is not exactly correct for sending utf8 chars but
+				 * let's try it anyway, maybe it will work somehow.
+				 */
+				if (xselreq.target == utf8_string_atom || xselreq.target == XA_STRING)
+				{
+					GooString *ptr = nullptr;
+					if (xselreq.selection == XA_PRIMARY)
+						ptr = st.primary.get();
+					if (xselreq.selection == clipboard_atom)
+						ptr = st.clipboard.get();
+
+					if (ptr) {
+						XChangeProperty(xselreq.display, xselreq.requestor,
+							xselreq.property, xselreq.target, 8, PropModeReplace,
+							(const unsigned char*)ptr->c_str(), ptr->getLength());
+						e.xselection.property = xselreq.property;
+					}
+				}
+
+				XSendEvent(xselreq.display, xselreq.requestor, True, EmptyMask, &e);
 			}
 		}
 		endloop:;
