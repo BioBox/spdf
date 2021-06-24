@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <climits>
 #include <clocale>
 #include <cstdlib>
@@ -46,7 +48,8 @@ enum Action {
 	PG_UP,
 	BACK,
 	RELOAD,
-	COPY
+	COPY,
+	GOTO_PAGE
 };
 
 struct Shortcut {
@@ -85,12 +88,27 @@ struct AppState {
 
 	unique_ptr<GooString> primary;
 	unique_ptr<GooString> clipboard;
+
+	GC status_gc;
+	GC text_gc;
+	XFontSet fset = NULL;
+	int fheight;
+	int fbase;
+	Rectangle status_pos;
+	string prompt;
+	string value;
+	bool status = false;
 };
 
 struct SetupXRet {
 	Display *display;
 	Window main;
 	GC selection;
+	GC status;
+	GC text;
+	XFontSet fset;
+	int fheight;
+	int fbase;
 };
 
 static SetupXRet setup_x(unsigned width, unsigned height, const string &file_name)
@@ -128,15 +146,39 @@ static SetupXRet setup_x(unsigned width, unsigned height, const string &file_nam
 	gcvals.function = GXinvert;
 	GC gc = XCreateGC(display, main, GCFunction, &gcvals);
 
+	XGCValues gcvals2;
+	gcvals2.foreground = WhitePixel(display, DefaultScreen(display));
+	GC gc2 = XCreateGC(display, main, GCForeground, &gcvals2);
+
+	int nmissing;
+	char **missing;
+	char *def_string;
+	XFontSet fset = XCreateFontSet(display, font, &missing, &nmissing, &def_string);
+	(!fset) && error("Cannot create font set.");
+	XFreeStringList(missing);
+
+	int fheight = 0, fbase = 0;
+	XFontStruct **fonts;
+	char **font_names;
+	int nfonts = XFontsOfFontSet(fset, &fonts, &font_names);
+	for (int i = 0; i < nfonts; ++i)
+	{
+		fbase   = max(fbase, fonts[i]->descent);
+		fheight = max(fheight, fonts[i]->ascent + fonts[i]->descent);
+	}
+
 	XMapWindow(display, main);
 	XSelectInput(display, main, KeyPressMask | ButtonPressMask | ButtonReleaseMask |
 		Button1MotionMask | StructureNotifyMask | ExposureMask);
 
-	return {display, main, gc};
+	return {display, main, gc, DefaultGC(display, DefaultScreen(display)), gc2,
+		fset, fheight, fbase};
 }
 
 static void cleanup_x(const AppState &st)
 {
+	if (st.fset != NULL)
+		XFreeFontSet(st.display, st.fset);
 	if (st.pdf != None)
 		XFreePixmap(st.display, st.pdf);
 	if (st.display != NULL)
@@ -243,24 +285,38 @@ static void copy_pixmap_on_expose_event(const AppState &st, const Rectangle &pre
 	}
 
 	Rectangle dirty = intersect({e.x, e.y, e.width, e.height}, st.pdf_pos);
-	if (is_invalid(dirty))
-		return;
-
-	XCopyArea(st.display, st.pdf, st.main,
-		DefaultGC(st.display, DefaultScreen(st.display)),
-		dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y,
-		dirty.width, dirty.height, dirty.x, dirty.y);
-
-	const CoordConv cc(st.page, st.pdf_pos, false);
-	auto rs = st.selecting ?
-		st.selection.normalized() :
-		cc.to_screen(st.pdf_selection);
-	if (rs.width > 0 && rs.height > 0)
+	if (!is_invalid(dirty))
 	{
-		dirty = intersect({e.x, e.y, e.width, e.height}, rs);
-		if (!is_invalid(dirty))
-			XFillRectangle(st.display, st.main, st.selection_gc,
-				dirty.x, dirty.y, dirty.width, dirty.height);
+		XCopyArea(st.display, st.pdf, st.main,
+			DefaultGC(st.display, DefaultScreen(st.display)),
+			dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y,
+			dirty.width, dirty.height, dirty.x, dirty.y);
+
+		const CoordConv cc(st.page, st.pdf_pos, false);
+		auto rs = st.selecting ?
+			st.selection.normalized() :
+			cc.to_screen(st.pdf_selection);
+		if (rs.width > 0 && rs.height > 0)
+		{
+			dirty = intersect({e.x, e.y, e.width, e.height}, rs);
+			if (!is_invalid(dirty))
+				XFillRectangle(st.display, st.main, st.selection_gc,
+					dirty.x, dirty.y, dirty.width, dirty.height);
+		}
+	}
+
+	if (st.status)
+	{
+		if (is_invalid(intersect({e.x, e.y, e.width, e.height}, st.status_pos)))
+			return;
+
+		XFillRectangle(st.display, st.main, st.status_gc,
+			st.status_pos.x, st.status_pos.y, st.status_pos.width, st.status_pos.height);
+
+		string str{st.prompt + st.value + "_"};
+		Xutf8DrawString(st.display, st.main, st.fset, st.text_gc,
+			st.status_pos.x + 1, st.status_pos.y + st.status_pos.height - (st.fbase + 1),
+			str.c_str(), str.size());
 	}
 }
 
@@ -395,6 +451,11 @@ static void copy_text(AppState &st, bool primary)
 	}
 }
 
+static Rectangle get_status_pos(const AppState &st)
+{
+	return {0, st.main_pos.height - (st.fheight + 2), st.main_pos.width, st.fheight + 2};
+}
+
 int main(int argc, char **argv)
 {
 	setlocale(LC_ALL, "");
@@ -424,6 +485,12 @@ int main(int argc, char **argv)
 		st.scrolling_up = false;
 
 		st.selection_gc = xret.selection;
+		st.status_gc    = xret.status;
+		st.text_gc      = xret.text;
+
+		st.fset    = xret.fset;
+		st.fheight = xret.fheight;
+		st.fbase   = xret.fbase;
 
 		XEvent event;
 		while (true)
@@ -464,6 +531,8 @@ int main(int argc, char **argv)
 						XFreePixmap(st.display, st.pdf);
 						st.pdf = None;
 					}
+
+					st.status_pos = get_status_pos(st);
 				}
 			}
 
@@ -481,10 +550,11 @@ int main(int argc, char **argv)
 				char buf[64];
 				XLookupString(&event.xkey, buf, sizeof(buf), &ksym, NULL);
 
+				bool status = st.status;
 				for (unsigned i = 0; i < sizeof(shortcuts) / sizeof(Shortcut); ++i)
 				{
 					auto sc = &shortcuts[i];
-					if (sc->ksym == ksym &&
+					if (!status && sc->ksym == ksym &&
 						(
 							sc->mask == AnyMask ||
 							sc->mask == event.xkey.state
@@ -620,6 +690,70 @@ int main(int argc, char **argv)
 							if (st.pdf_selection.width > 0 && st.pdf_selection.height > 0)
 								copy_text(st, false);
 						}
+
+						if (sc->action == GOTO_PAGE)
+						{
+							st.status = true;
+							st.prompt = "goto page [1, " + to_string(st.doc->getNumPages()) + "]: ";
+							st.value  = "";
+							send_expose(st, st.status_pos);
+						}
+					}
+				}
+
+				if (status)
+				{
+					if (ksym == XK_Escape)
+					{
+						st.status = false;
+						XClearArea(st.display, st.main,
+							st.status_pos.x, st.status_pos.y,
+							st.status_pos.width, st.status_pos.height, True);
+					}
+
+					if (ksym == XK_BackSpace)
+					{
+						if (!st.value.empty())
+						{
+							size_t off = 0;
+							int num    = 0;
+							while (off < st.value.size())
+							{
+								num  = mblen(st.value.c_str() + off, st.value.size() - off);
+								off += num;
+							}
+
+							while (num-- > 0)
+								st.value.pop_back();
+
+							XClearArea(st.display, st.main,
+								st.status_pos.x, st.status_pos.y,
+								st.status_pos.width, st.status_pos.height, True);
+						}
+					}
+
+					if (ksym == XK_Return)
+					{
+						int page;
+						auto [p, ec] = from_chars(st.value.data(),
+							st.value.data() + st.value.size(), page);
+						if (ec == errc() && page >= 1 && page <= st.doc->getNumPages())
+						{
+							st.status   = false;
+							st.page_num = page;
+
+							XClearArea(st.display, st.main,
+								st.status_pos.x, st.status_pos.y,
+								st.status_pos.width, st.status_pos.height, True);
+							render_page_lambda();
+						}
+					}
+
+					string s{buf};
+					if (s != "" && !iscntrl((unsigned char)s[0]))
+					{
+						st.value += s;
+						send_expose(st, st.status_pos);
 					}
 				}
 			}

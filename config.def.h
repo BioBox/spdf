@@ -24,7 +24,8 @@ static Shortcut shortcuts[] = {
 	{EmptyMask,   XK_Page_Up,   PG_UP},
 	{EmptyMask,   XK_b,         BACK},
 	{AnyMask,     XK_r,         RELOAD},
-	{ControlMask, XK_c,         COPY}
+	{ControlMask, XK_c,         COPY},
+	{AnyMask,     XK_g,         GOTO_PAGE}
 };
 
 /*
@@ -33,3 +34,9 @@ static Shortcut shortcuts[] = {
 static double arrow_scroll = 0.01;
 static double page_scroll  = 0.30;
 static double mouse_scroll = 0.02;
+
+/*
+ * Status line font, must be in X logical font description format
+ * (see: https://en.wikipedia.org/wiki/X_logical_font_description).
+ */
+static const char *font = "-misc-fixed-medium-r-normal-*-14-*-*-*-*-*-*-*";
