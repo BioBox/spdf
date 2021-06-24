@@ -49,7 +49,8 @@ enum Action {
 	BACK,
 	RELOAD,
 	COPY,
-	GOTO_PAGE
+	GOTO_PAGE,
+	SEARCH
 };
 
 struct Shortcut {
@@ -98,6 +99,9 @@ struct AppState {
 	string prompt;
 	string value;
 	bool status = false;
+
+	double left, top, right, bottom;
+	bool searching = false;
 };
 
 struct SetupXRet {
@@ -456,6 +460,85 @@ static Rectangle get_status_pos(const AppState &st)
 	return {0, st.main_pos.height - (st.fheight + 2), st.main_pos.width, st.fheight + 2};
 }
 
+static void search_text(AppState &st)
+{
+	bool backwards   = false;
+	bool ignore_case = false;
+	bool whole_words = false;
+	string str = st.value;
+	while (str.back() == '?' || str.back() == '~' || str.back() == '%')
+	{
+		char flag = str.back();
+		if (flag == '?')
+			backwards = true;
+		if (flag == '~')
+			ignore_case = true;
+		if (flag == '%')
+			whole_words = true;
+		str.pop_back();
+	}
+
+	vector<wchar_t> wstr(str.size());
+	mbstowcs(wstr.data(), str.c_str(), str.size());
+
+	vector<Unicode> search{wstr.begin(), find(wstr.begin(), wstr.end(), 0)};
+
+	bool found = false;
+	bool whole = false;
+	int page   = st.page_num;
+
+	while (!whole)
+	{
+		TextOutputDev tdev(nullptr, false, 0, false, false);
+
+		st.doc->displayPage(&tdev, page, 72, 72, 0, false, true, false);
+
+		found = tdev.takeText()->findText(search.data(), search.size(),
+			!st.searching, true, st.searching, false,
+			!ignore_case, backwards, whole_words,
+			&st.left, &st.top, &st.right, &st.bottom);
+
+		if (found)
+			break;
+
+		if (!backwards && page < st.doc->getNumPages())
+		{
+			++page;
+			st.searching = false;
+		}
+		else if (backwards && page > 1)
+		{
+			--page;
+			st.searching = false;
+		}
+		else {
+			whole = true;
+		}
+	}
+
+	if (found)
+	{
+		if (page != st.page_num)
+		{
+			st.page_num = page;
+
+			st.page = st.doc->getPage(st.page_num);
+			(!st.page) && error("Cannot create page: " + to_string(st.page_num) + ".");
+			force_render_page(st);
+		}
+
+		const CoordConv cc(st.page, st.pdf_pos, false);
+
+		st.pdf_selection = {int(st.left), int(st.top), int(st.right - st.left), int(st.bottom - st.top)};
+		st.selection     = cc.to_screen(st.pdf_selection);
+	}
+	else {
+		st.pdf_selection = st.selection = {0, 0, 0, 0};
+	}
+
+	st.searching = found;
+}
+
 int main(int argc, char **argv)
 {
 	setlocale(LC_ALL, "");
@@ -698,6 +781,14 @@ int main(int argc, char **argv)
 							st.value  = "";
 							send_expose(st, st.status_pos);
 						}
+
+						if (sc->action == SEARCH)
+						{
+							st.status = true;
+							st.prompt = "search: ";
+							st.value  = "";
+							send_expose(st, st.status_pos);
+						}
 					}
 				}
 
@@ -705,7 +796,7 @@ int main(int argc, char **argv)
 				{
 					if (ksym == XK_Escape)
 					{
-						st.status = false;
+						st.status = st.searching = false;
 						XClearArea(st.display, st.main,
 							st.status_pos.x, st.status_pos.y,
 							st.status_pos.width, st.status_pos.height, True);
@@ -734,18 +825,28 @@ int main(int argc, char **argv)
 
 					if (ksym == XK_Return)
 					{
-						int page;
-						auto [p, ec] = from_chars(st.value.data(),
-							st.value.data() + st.value.size(), page);
-						if (ec == errc() && page >= 1 && page <= st.doc->getNumPages())
+						if (st.prompt.substr(0, 4) == "goto")
 						{
-							st.status   = false;
-							st.page_num = page;
+							int page;
+							auto [p, ec] = from_chars(st.value.data(),
+								st.value.data() + st.value.size(), page);
+							if (ec == errc() && page >= 1 && page <= st.doc->getNumPages())
+							{
+								st.status   = false;
+								st.page_num = page;
 
-							XClearArea(st.display, st.main,
-								st.status_pos.x, st.status_pos.y,
-								st.status_pos.width, st.status_pos.height, True);
-							render_page_lambda();
+								XClearArea(st.display, st.main,
+									st.status_pos.x, st.status_pos.y,
+									st.status_pos.width, st.status_pos.height, True);
+								render_page_lambda();
+							}
+						}
+
+						if (st.prompt.substr(0, 6) == "search")
+						{
+							send_expose(st, st.selection.normalized());
+							search_text(st);
+							send_expose(st, st.selection.normalized());
 						}
 					}
 
