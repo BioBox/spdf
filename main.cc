@@ -104,6 +104,8 @@ struct AppState {
 
 	double left, top, right, bottom;
 	bool searching = false;
+
+	bool xembed_init = false;
 };
 
 struct SetupXRet {
@@ -117,7 +119,8 @@ struct SetupXRet {
 	int fbase;
 };
 
-static SetupXRet setup_x(unsigned width, unsigned height, const string &file_name)
+static SetupXRet setup_x(unsigned width, unsigned height, const string &file_name,
+	Window root)
 {
 	Display *display = XOpenDisplay(NULL);
 	(!display) && error("Cannot open X display.");
@@ -126,8 +129,9 @@ static SetupXRet setup_x(unsigned width, unsigned height, const string &file_nam
 	XAllocNamedColor(display, DefaultColormap(display, DefaultScreen(display)),
 		bg_color, &sc, &ec);
 
-	Window main = XCreateSimpleWindow(display, DefaultRootWindow(display),
-		0, 0, width, height, 2, 0, ec.pixel);
+	if (root == None)
+		root = DefaultRootWindow(display);
+	Window main = XCreateSimpleWindow(display, root, 0, 0, width, height, 2, 0, ec.pixel);
 
 	string window_name("lpdf: " + file_name);
 	string icon_name("lpdf");
@@ -147,6 +151,9 @@ static SetupXRet setup_x(unsigned width, unsigned height, const string &file_nam
 		PropModeReplace, (const unsigned char*)window_name.c_str(), window_name.size());
 	XChangeProperty(display, main, wm_icon_name_atom, utf8_string_atom, 8,
 		PropModeReplace, (const unsigned char*)icon_name.c_str(), icon_name.size());
+
+	Atom wmdel_atom = XInternAtom(display, "WM_DELETE_WINDOW", False);
+	XSetWMProtocols(display, main, &wmdel_atom, 1);
 
 	XGCValues gcvals;
 	gcvals.function = GXinvert;
@@ -543,15 +550,47 @@ static void search_text(AppState &st)
 	st.searching = found;
 }
 
+struct Args {
+	string fname;
+	Window root;
+};
+
+Args parse_args(int argc, char **argv)
+{
+	string fname = "";
+	Window root  = None;
+
+	for (int i = 1; i < argc; ++i)
+	{
+		if (string(argv[i]) == "-w")
+		{
+			if (i < argc - 1)
+			{
+				root = strtol(argv[++i], NULL, 0);
+				(root == 0) && error("Invalid window (-w) value.");
+			}
+			else
+				error("Missing window (-w) parameter.");
+		}
+		else
+			fname = string(argv[i]);
+	}
+
+	if (fname == "")
+		error(string("Missing pdf file, usage: ") + argv[0] + " [-w window] pdf_file.");
+
+	return {fname, root};
+}
+
 int main(int argc, char **argv)
 {
 	setlocale(LC_ALL, "");
 
 	AppState st;
 	try {
-		(argc != 2) && error(string("Missing pdf file, usage: ") + argv[0] + " pdf_file.");
+		auto args = parse_args(argc, argv);
 
-		string file_name(argv[1]);
+		string file_name(args.fname);
 
 		GlobalParamsIniter global_params(NULL);
 
@@ -563,7 +602,7 @@ int main(int argc, char **argv)
 		(!st.page) && error("Document has no pages.");
 
 		auto rect = st.page->getCropBox();
-		auto xret = setup_x(rect->x2 - rect->x1, rect->y2 - rect->y1, file_name);
+		auto xret = setup_x(rect->x2 - rect->x1, rect->y2 - rect->y1, file_name, args.root);
 
 		st.display = xret.display;
 		st.main    = xret.main;
@@ -621,6 +660,23 @@ int main(int argc, char **argv)
 
 					st.status_pos = get_status_pos(st);
 				}
+			}
+
+			if (event.type == ClientMessage)
+			{
+				Atom xembed_atom = XInternAtom(st.display, "_XEMBED", False);
+				Atom wmdel_atom  = XInternAtom(st.display, "WM_DELETE_WINDOW", False);
+
+				if (event.xclient.message_type == xembed_atom && event.xclient.format == 32)
+				{
+					if (!st.xembed_init)
+					{
+						force_render_page(st);
+						st.xembed_init = true;
+					}
+				}
+				else if (event.xclient.data.l[0] == (long)wmdel_atom)
+					goto endloop;
 			}
 
 			auto render_page_lambda = [&]() {
