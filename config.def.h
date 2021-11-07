@@ -27,7 +27,8 @@ static Shortcut shortcuts[] = {
 	{ControlMask, XK_c,         COPY},
 	{AnyMask,     XK_g,         GOTO_PAGE},
 	{AnyMask,     XK_s,         SEARCH},
-	{EmptyMask,   XK_slash,     SEARCH}
+	{EmptyMask,   XK_slash,     SEARCH},
+	{EmptyMask,   XK_p,         PAGE}
 };
 
 /*

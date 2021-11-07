@@ -50,7 +50,8 @@ enum Action {
 	RELOAD,
 	COPY,
 	GOTO_PAGE,
-	SEARCH
+	SEARCH,
+	PAGE
 };
 
 struct Shortcut {
@@ -99,6 +100,7 @@ struct AppState {
 	string prompt;
 	string value;
 	bool status = false;
+	bool input = false;
 
 	double left, top, right, bottom;
 	bool searching = false;
@@ -318,6 +320,8 @@ static void copy_pixmap_on_expose_event(const AppState &st, const Rectangle &pre
 			st.status_pos.x, st.status_pos.y, st.status_pos.width, st.status_pos.height);
 
 		string str{st.prompt + st.value + "_"};
+		if (!st.input)
+			str = st.prompt;
 		Xutf8DrawString(st.display, st.main, st.fset, st.text_gc,
 			st.status_pos.x + 1, st.status_pos.y + st.status_pos.height - (st.fbase + 1),
 			str.c_str(), str.size());
@@ -777,6 +781,7 @@ int main(int argc, char **argv)
 						if (sc->action == GOTO_PAGE)
 						{
 							st.status = true;
+							st.input  = true;
 							st.prompt = "goto page [1, " + to_string(st.doc->getNumPages()) + "]: ";
 							st.value  = "";
 							send_expose(st, st.status_pos);
@@ -785,7 +790,17 @@ int main(int argc, char **argv)
 						if (sc->action == SEARCH)
 						{
 							st.status = true;
+							st.input  = true;
 							st.prompt = "search: ";
+							st.value  = "";
+							send_expose(st, st.status_pos);
+						}
+
+						if (sc->action == PAGE)
+						{
+							st.status = true;
+							st.input  = false;
+							st.prompt = "page " + to_string(st.page_num) + "/" + to_string(st.doc->getNumPages());
 							st.value  = "";
 							send_expose(st, st.status_pos);
 						}
@@ -850,11 +865,14 @@ int main(int argc, char **argv)
 						}
 					}
 
-					string s{buf};
-					if (s != "" && !iscntrl((unsigned char)s[0]))
+					if (st.input)
 					{
-						st.value += s;
-						send_expose(st, st.status_pos);
+						string s{buf};
+						if (s != "" && !iscntrl((unsigned char)s[0]))
+						{
+							st.value += s;
+							send_expose(st, st.status_pos);
+						}
 					}
 				}
 			}
