@@ -28,7 +28,8 @@ static Shortcut shortcuts[] = {
 	{AnyMask,     XK_g,         GOTO_PAGE},
 	{AnyMask,     XK_s,         SEARCH},
 	{EmptyMask,   XK_slash,     SEARCH},
-	{EmptyMask,   XK_p,         PAGE}
+	{EmptyMask,   XK_p,         PAGE},
+	{EmptyMask,   XK_m,         MAGNIFY}
 };
 
 /*

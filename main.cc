@@ -51,7 +51,8 @@ enum Action {
 	COPY,
 	GOTO_PAGE,
 	SEARCH,
-	PAGE
+	PAGE,
+	MAGNIFY
 };
 
 struct Shortcut {
@@ -106,6 +107,10 @@ struct AppState {
 	bool searching = false;
 
 	bool xembed_init = false;
+
+	bool magnifying = false;
+	Rectangle magnify;
+	int pre_mag_y;
 };
 
 struct SetupXRet {
@@ -201,14 +206,25 @@ static void cleanup_x(const AppState &st)
 struct PdfRenderConf {
 	double dpi;
 	Rectangle pos;
+	Rectangle crop;
 };
 
 PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, int offset,
-	Rectangle p, const Page *page)
+	Rectangle p, const Page *page, bool magnifying, Rectangle m)
 {
 	auto rect   = page->getCropBox();
+	auto x0     = rect->x1;
+	auto y0     = rect->y1;
 	auto width  = rect->x2 - rect->x1;
 	auto height = rect->y2 - rect->y1;
+
+	if (magnifying)
+	{
+		x0     = m.x;
+		y0     = m.y;
+		width  = m.width;
+		height = m.height;
+	}
 
 	int x, y, w, h;
 	double dpi;
@@ -249,7 +265,10 @@ PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, int offset,
 				y = p.height - h;
 		}
 	}
-	return {dpi, {x, y, w, h}};
+
+	auto scale = dpi / 72.0;
+	return {dpi, {x, y, w, h},
+		{int(x0 * scale), int(y0 * scale), int(width * scale), int(height * scale)}};
 }
 
 static Pixmap render_pdf_page_to_pixmap(const AppState &st, const PdfRenderConf &prc)
@@ -261,8 +280,8 @@ static Pixmap render_pdf_page_to_pixmap(const AppState &st, const PdfRenderConf 
 	sdev.setVectorAntialias(true);
 
 	sdev.startDoc(st.doc.get());
-	st.doc->displayPage(&sdev, st.page_num, prc.dpi, prc.dpi, st.page->getRotate(),
-		false, true, false);
+	st.doc->displayPageSlice(&sdev, st.page_num, prc.dpi, prc.dpi, st.page->getRotate(),
+		false, true, false, prc.crop.x, prc.crop.y, prc.crop.width, prc.crop.height);
 
 	SplashBitmap *img = sdev.getBitmap();
 
@@ -629,7 +648,7 @@ int main(int argc, char **argv)
 				if (st.pdf == None)
 				{
 					auto prc = get_pdf_render_conf(st.fit_page, st.scrolling_up,
-						st.next_pos_y, st.main_pos, st.page);
+						st.next_pos_y, st.main_pos, st.page, st.magnifying, st.magnify);
 					st.scrolling_up = false;
 					st.next_pos_y   = 0;
 
@@ -860,6 +879,26 @@ int main(int argc, char **argv)
 							st.value  = "";
 							send_expose(st, st.status_pos);
 						}
+
+						if (sc->action == MAGNIFY)
+						{
+							if (st.pdf_selection.width > 0 && st.pdf_selection.height > 0)
+							{
+								st.magnifying = true;
+								st.magnify    = st.pdf_selection;
+								st.selection  = st.pdf_selection = {0, 0, 0, 0};
+
+								st.status = true;
+								st.input  = false;
+								st.prompt = "magnify";
+								st.value  = "";
+
+								st.pre_mag_y = st.pdf_pos.y;
+								st.pdf_pos.y = 0;
+
+								force_render_page(st);
+							}
+						}
 					}
 				}
 
@@ -871,6 +910,13 @@ int main(int argc, char **argv)
 						XClearArea(st.display, st.main,
 							st.status_pos.x, st.status_pos.y,
 							st.status_pos.width, st.status_pos.height, True);
+
+						if (st.magnifying)
+						{
+							st.magnifying = false;
+							st.next_pos_y = st.pre_mag_y;
+							force_render_page(st);
+						}
 					}
 
 					if (ksym == XK_BackSpace)
@@ -936,7 +982,7 @@ int main(int argc, char **argv)
 			if (event.type == ButtonPress)
 			{
 				auto button = event.xbutton.button;
-				if (button == Button4 && st.fit_page)
+				if (button == Button4 && st.fit_page && !st.magnifying)
 				{
 					if (st.page_num > 1)
 					{
@@ -946,7 +992,7 @@ int main(int argc, char **argv)
 					}
 				}
 
-				if (button == Button5 && st.fit_page)
+				if (button == Button5 && st.fit_page && !st.magnifying)
 				{
 					if (st.page_num < st.doc->getNumPages())
 					{
@@ -964,7 +1010,7 @@ int main(int argc, char **argv)
 						force_render_page(st, false);
 					}
 					else {
-						if (st.page_num > 1)
+						if (st.page_num > 1 && !st.magnifying)
 						{
 							st.scrolling_up = true;
 							--st.page_num;
@@ -982,7 +1028,7 @@ int main(int argc, char **argv)
 						force_render_page(st, false);
 					}
 					else {
-						if (st.page_num < st.doc->getNumPages())
+						if (st.page_num < st.doc->getNumPages() && !st.magnifying)
 						{
 							++st.page_num;
 							render_page_lambda();
@@ -990,7 +1036,7 @@ int main(int argc, char **argv)
 					}
 				}
 
-				if (button == Button1)
+				if (button == Button1 && !st.magnifying)
 				{
 					if (event.xbutton.x >= st.pdf_pos.x &&
 						event.xbutton.y >= st.pdf_pos.y &&
