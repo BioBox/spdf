@@ -1,14 +1,21 @@
+#include <algorithm>
+
 #include "coordconv.h"
 
-CoordConv::CoordConv(const Page *p, const Rectangle &r, bool i) : rect(r), inverty(i)
+CoordConv::CoordConv(const Page *p, const Rectangle &r, bool i, int rotation)
+	: rect(r), inverty(i)
 {
 	auto pbox = p->getCropBox();
 
-	xscale = (pbox->x2 - pbox->x1) / double(rect.width);
-	yscale = (pbox->y2 - pbox->y1) / double(rect.height);
-}
+	auto width  = pbox->x2 - pbox->x1;
+	auto height = pbox->y2 - pbox->y1;
 
-CoordConv::CoordConv(const Page *p, const Rectangle &r) : CoordConv(p, r, true) {}
+	if (abs(p->getRotate() - rotation) % 180 != 0)
+		std::swap(width, height);
+
+	xscale = (width) / double(rect.width);
+	yscale = (height) / double(rect.height);
+}
 
 double CoordConv::to_pdf_x(int x) const
 {

@@ -52,7 +52,9 @@ enum Action {
 	GOTO_PAGE,
 	SEARCH,
 	PAGE,
-	MAGNIFY
+	MAGNIFY,
+	ROTATE_CW,
+	ROTATE_CCW
 };
 
 struct Shortcut {
@@ -111,6 +113,8 @@ struct AppState {
 	bool magnifying = false;
 	Rectangle magnify;
 	int pre_mag_y;
+
+	int rotation = 0;
 };
 
 struct SetupXRet {
@@ -210,13 +214,16 @@ struct PdfRenderConf {
 };
 
 PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, int offset,
-	Rectangle p, const Page *page, bool magnifying, Rectangle m)
+	Rectangle p, const Page *page, bool magnifying, Rectangle m, int rotation)
 {
 	auto rect   = page->getCropBox();
 	auto x0     = rect->x1;
 	auto y0     = rect->y1;
 	auto width  = rect->x2 - rect->x1;
 	auto height = rect->y2 - rect->y1;
+
+	if (abs(page->getRotate() - rotation) % 180 != 0)
+		swap(height, width);
 
 	if (magnifying)
 	{
@@ -280,7 +287,7 @@ static Pixmap render_pdf_page_to_pixmap(const AppState &st, const PdfRenderConf 
 	sdev.setVectorAntialias(true);
 
 	sdev.startDoc(st.doc.get());
-	st.doc->displayPageSlice(&sdev, st.page_num, prc.dpi, prc.dpi, st.page->getRotate(),
+	st.doc->displayPageSlice(&sdev, st.page_num, prc.dpi, prc.dpi, st.rotation,
 		false, true, false, prc.crop.x, prc.crop.y, prc.crop.width, prc.crop.height);
 
 	SplashBitmap *img = sdev.getBitmap();
@@ -324,7 +331,7 @@ static void copy_pixmap_on_expose_event(const AppState &st, const Rectangle &pre
 			dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y,
 			dirty.width, dirty.height, dirty.x, dirty.y);
 
-		const CoordConv cc(st.page, st.pdf_pos, false);
+		const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
 		auto rs = st.selecting ?
 			st.selection.normalized() :
 			cc.to_screen(st.pdf_selection);
@@ -410,7 +417,7 @@ static bool find_page_link(AppState &st, const XButtonEvent &e)
 	if (links->getNumLinks() == 0)
 		return false;
 
-	const CoordConv cc(st.page, st.pdf_pos);
+	const CoordConv cc(st.page, st.pdf_pos, true, st.rotation);
 	double ex = cc.to_pdf_x(e.x);
 	double ey = cc.to_pdf_y(e.y);
 
@@ -462,9 +469,9 @@ static void copy_text(AppState &st, bool primary)
 {
 	TextOutputDev tdev(nullptr, false, 0, false, false);
 
-	st.doc->displayPage(&tdev, st.page_num, 72, 72, st.page->getRotate(), false, true, false);
+	st.doc->displayPage(&tdev, st.page_num, 72, 72, st.rotation, false, true, false);
 
-	const CoordConv cc(st.page, st.pdf_pos, false);
+	const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
 
 	auto sr = st.selection.normalized();
 	auto x1 = cc.to_pdf_x(sr.x);
@@ -557,7 +564,7 @@ static void search_text(AppState &st)
 			force_render_page(st);
 		}
 
-		const CoordConv cc(st.page, st.pdf_pos, false);
+		const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
 
 		st.pdf_selection = {int(st.left), int(st.top), int(st.right - st.left), int(st.bottom - st.top)};
 		st.selection     = cc.to_screen(st.pdf_selection);
@@ -648,7 +655,8 @@ int main(int argc, char **argv)
 				if (st.pdf == None)
 				{
 					auto prc = get_pdf_render_conf(st.fit_page, st.scrolling_up,
-						st.next_pos_y, st.main_pos, st.page, st.magnifying, st.magnify);
+						st.next_pos_y, st.main_pos, st.page, st.magnifying, st.magnify,
+						st.rotation);
 					st.scrolling_up = false;
 					st.next_pos_y   = 0;
 
@@ -899,6 +907,22 @@ int main(int argc, char **argv)
 								force_render_page(st);
 							}
 						}
+
+						if (sc->action == ROTATE_CW)
+						{
+							st.rotation += 90;
+							if (st.rotation > 270)
+								st.rotation = 0;
+							force_render_page(st, true);
+						}
+
+						if (sc->action == ROTATE_CCW)
+						{
+							st.rotation -= 90;
+							if (st.rotation < 0)
+								st.rotation = 270;
+							force_render_page(st, true);
+						}
 					}
 				}
 
@@ -1048,7 +1072,7 @@ int main(int argc, char **argv)
 							render_page_lambda();
 						}
 						else {
-							const CoordConv cc(st.page, st.pdf_pos, false);
+							const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
 							st.selection = cc.to_screen(st.pdf_selection);
 
 							// Padding needed because of float rounding errors in cc.
@@ -1068,7 +1092,7 @@ int main(int argc, char **argv)
 					st.selection.width  = event.xbutton.x - st.selection.x;
 					st.selection.height = event.xbutton.y - st.selection.y;
 
-					const CoordConv cc(st.page, st.pdf_pos, false);
+					const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
 					st.pdf_selection = cc.to_pdf(st.selection.normalized());
 					st.selecting = false;
 
