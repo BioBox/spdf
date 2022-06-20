@@ -1,6 +1,6 @@
 #include <algorithm>
 
-#include "rectangle.h"
+#include "rectangle.hpp"
 
 using namespace std;
 

@@ -1,16 +1,16 @@
-SOURCES = main.cc rectangle.cc coordconv.cc
-OBJECTS = $(SOURCES:.cc=.o)
+SOURCES = main.cpp rectangle.cpp coordconv.cpp
+OBJECTS = $(SOURCES:.cpp=.o)
 
 CXXFLAGS ?= -Wall -O0 -g
 
 lpdf: $(OBJECTS)
 	$(CXX) -lpoppler -lX11 $(OBJECTS) -o $@
 
-%.o: %.cc config.h
+%.o: %.cpp config.hpp
 	$(CXX) -std=c++17 $(CXXFLAGS) -I/usr/include/poppler -c $< -o $@
 
 config.h:
-	cp config.def.h config.h
+	cp config.def.hpp config.hpp
 
 clean:
 	rm -f lpdf $(OBJECTS)

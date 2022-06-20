@@ -26,8 +26,8 @@
 #include <poppler/goo/GooString.h>
 #include <poppler/splash/SplashBitmap.h>
 
-#include "coordconv.h"
-#include "rectangle.h"
+#include "coordconv.hpp"
+#include "rectangle.hpp"
 
 using namespace std;
 
