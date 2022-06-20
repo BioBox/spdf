@@ -4,11 +4,11 @@
 #include <vector>
 
 struct Rectangle {
-	int x, y;
-	int width, height;
+  int x, y;
+  int width, height;
 
-	Rectangle normalized() const;
-	Rectangle padded(int p) const;
+  Rectangle normalized() const;
+  Rectangle padded(int p) const;
 };
 
 Rectangle intersect(const Rectangle &a, const Rectangle &b);
