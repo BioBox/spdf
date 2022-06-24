@@ -3,7 +3,7 @@ OBJECTS = $(SOURCES:.cpp=.o)
 
 CXXFLAGS ?= -Wall -O0 -g
 
-lpdf: $(OBJECTS)
+spdf: $(OBJECTS)
 	$(CXX) -lpoppler -lX11 $(OBJECTS) -o $@
 
 %.o: %.cpp config.hpp
@@ -13,4 +13,4 @@ config.h:
 	cp config.def.hpp config.hpp
 
 clean:
-	rm -f lpdf $(OBJECTS)
+	rm -f spdf $(OBJECTS)

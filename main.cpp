@@ -145,8 +145,8 @@ static SetupXRet setup_x(unsigned width, unsigned height,
   Window main =
       XCreateSimpleWindow(display, root, 0, 0, width, height, 2, 0, ec.pixel);
 
-  string window_name("lpdf: " + file_name);
-  string icon_name("lpdf");
+  string window_name("spdf: " + file_name);
+  string icon_name("spdf");
 
   Xutf8SetWMProperties(display, main, window_name.c_str(), icon_name.c_str(),
                        NULL, 0, NULL, NULL, NULL);
