@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <climits>
 #include <clocale>
 #include <cstdlib>
 #include <exception>
@@ -11,62 +10,21 @@
 #include <stdexcept>
 #include <string>
 
-#include <X11/Xatom.h>
+#include <poppler-document.h>
+#include <poppler-page-renderer.h>
+#include <poppler-page.h>
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 
-#include <poppler/Annot.h>
-#include <poppler/GlobalParams.h>
-#include <poppler/Link.h>
-#include <poppler/PDFDoc.h>
-#include <poppler/Page.h>
-#include <poppler/SplashOutputDev.h>
-#include <poppler/TextOutputDev.h>
-#include <poppler/goo/GooString.h>
-#include <poppler/splash/SplashBitmap.h>
-
 #include "coordconv.hpp"
 #include "rectangle.hpp"
 
-using namespace std;
+#include "config.hpp"
 
-#define AnyMask UINT_MAX
-#define EmptyMask 0
-
-enum Action {
-  QUIT,
-  NEXT,
-  PREV,
-  FIRST,
-  LAST,
-  FIT_PAGE,
-  FIT_WIDTH,
-  DOWN,
-  UP,
-  PG_DOWN,
-  PG_UP,
-  BACK,
-  RELOAD,
-  COPY,
-  GOTO_PAGE,
-  SEARCH,
-  PAGE,
-  MAGNIFY,
-  ROTATE_CW,
-  ROTATE_CCW
-};
-
-struct Shortcut {
-  unsigned mask;
-  KeySym ksym;
-  Action action;
-};
-
-#include "config.h"
-
-static bool error(const string &m) {
-  throw runtime_error(m);
+static bool error(const std::string &m) {
+  throw std::runtime_error(m);
   return false;
 }
 
@@ -75,46 +33,44 @@ struct PageAndOffset {
 };
 
 struct AppState {
-  unique_ptr<PDFDoc> doc;
-  Page *page = NULL;
+  std::unique_ptr<poppler::document> doc;
+  poppler::page *page = NULL;
+  std::unique_ptr<poppler::page_renderer> renderer;
   int page_num;
   bool fit_page;
   bool scrolling_up;
   int next_pos_y = 0;
-  stack<PageAndOffset> page_stack;
+  std::stack<PageAndOffset> page_stack;
 
   Display *display = NULL;
   Window main;
-  Rectangle main_pos;
+  srect main_pos;
   Pixmap pdf = None;
-  Rectangle pdf_pos{0, 0, 0, 0};
+  srect pdf_pos{0, 0, 0, 0};
 
   GC selection_gc;
-  Rectangle selection{0, 0, 0, 0};
-  Rectangle pdf_selection{0, 0, 0, 0};
+  srect selection{0, 0, 0, 0};
+  srectf pdf_selection{0, 0, 0, 0};
   bool selecting = false;
-
-  unique_ptr<GooString> primary;
-  unique_ptr<GooString> clipboard;
 
   GC status_gc;
   GC text_gc;
   XFontSet fset = NULL;
   int fheight;
   int fbase;
-  Rectangle status_pos;
-  string prompt;
-  string value;
+  srect status_pos;
+  std::string prompt;
+  std::string value;
   bool status = false;
   bool input = false;
 
-  double left, top, right, bottom;
+  srectf pos;
   bool searching = false;
 
   bool xembed_init = false;
 
   bool magnifying = false;
-  Rectangle magnify;
+  srectf magnify;
   int pre_mag_y;
 
   int rotation = 0;
@@ -132,7 +88,7 @@ struct SetupXRet {
 };
 
 static SetupXRet setup_x(unsigned width, unsigned height,
-                         const string &file_name, Window root) {
+                         const std::string &file_name, Window root) {
   Display *display = XOpenDisplay(NULL);
   (!display) && error("Cannot open X display.");
 
@@ -145,8 +101,8 @@ static SetupXRet setup_x(unsigned width, unsigned height,
   Window main =
       XCreateSimpleWindow(display, root, 0, 0, width, height, 2, 0, ec.pixel);
 
-  string window_name("spdf: " + file_name);
-  string icon_name("spdf");
+  std::string window_name("spdf: " + file_name);
+  std::string icon_name("spdf");
 
   Xutf8SetWMProperties(display, main, window_name.c_str(), icon_name.c_str(),
                        NULL, 0, NULL, NULL, NULL);
@@ -191,8 +147,8 @@ static SetupXRet setup_x(unsigned width, unsigned height,
   char **font_names;
   int nfonts = XFontsOfFontSet(fset, &fonts, &font_names);
   for (int i = 0; i < nfonts; ++i) {
-    fbase = max(fbase, fonts[i]->descent);
-    fheight = max(fheight, fonts[i]->ascent + fonts[i]->descent);
+    fbase = std::max(fbase, fonts[i]->descent);
+    fheight = std::max(fheight, fonts[i]->ascent + fonts[i]->descent);
   }
 
   XMapWindow(display, main);
@@ -215,60 +171,57 @@ static void cleanup_x(const AppState &st) {
 
 struct PdfRenderConf {
   double dpi;
-  Rectangle pos;
-  Rectangle crop;
+  srect pos;
+  srect crop;
 };
 
 PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, int offset,
-                                  Rectangle p, const Page *page,
-                                  bool magnifying, Rectangle m, int rotation) {
-  auto rect = page->getCropBox();
-  auto x0 = rect->x1;
-  auto y0 = rect->y1;
-  auto width = rect->x2 - rect->x1;
-  auto height = rect->y2 - rect->y1;
-
-  if (abs(page->getRotate() - rotation) % 180 != 0)
-    swap(height, width);
+                                  srect p, const poppler::page *page,
+                                  bool magnifying, srectf m, int rotation) {
+  auto rect = page->page_rect();
+  auto x0 = rect.x();
+  auto y0 = rect.y();
+  auto width = rect.width();
+  auto height = rect.height();
 
   if (magnifying) {
-    x0 = m.x;
-    y0 = m.y;
-    width = m.width;
-    height = m.height;
+    x0 = m.x();
+    y0 = m.y();
+    width = m.width();
+    height = m.height();
   }
 
   int x, y, w, h;
   double dpi;
   if (fit_page) {
-    if (double(p.width) / double(p.height) > width / height) {
-      h = p.height;
-      dpi = double(p.height) * 72.0 / height;
+    if (double(p.width()) / double(p.height()) > width / height) {
+      h = p.height();
+      dpi = double(p.height()) * 72.0 / height;
       w = width * dpi / 72.0;
 
       y = 0;
-      x = (p.width - w) / 2;
+      x = (p.width() - w) / 2;
     } else {
-      w = p.width;
-      dpi = double(p.width) * 72.0 / width;
+      w = p.width();
+      dpi = double(p.width()) * 72.0 / width;
       h = height * dpi / 72.0;
 
       x = 0;
-      y = (p.height - h) / 2;
+      y = (p.height() - h) / 2;
     }
   } else {
-    w = p.width;
-    dpi = double(p.width) * 72.0 / width;
+    w = p.width();
+    dpi = double(p.width()) * 72.0 / width;
     h = height * dpi / 72.0;
 
     x = 0;
-    if (double(p.width) / double(p.height) <= width / height) {
-      y = (p.height - h) / 2;
+    if (double(p.width()) / double(p.height()) <= width / height) {
+      y = (p.height() - h) / 2;
     } else {
       if (!scrolling_up)
         y = offset;
       else
-        y = p.height - h;
+        y = p.height() - h;
     }
   }
 
@@ -281,30 +234,20 @@ PdfRenderConf get_pdf_render_conf(bool fit_page, bool scrolling_up, int offset,
 
 static Pixmap render_pdf_page_to_pixmap(const AppState &st,
                                         const PdfRenderConf &prc) {
-  SplashColor paper{0xff, 0xff, 0xff};
 
-  SplashOutputDev sdev(splashModeXBGR8, 4, false, paper);
-  sdev.setFontAntialias(true);
-  sdev.setVectorAntialias(true);
-
-  sdev.startDoc(st.doc.get());
-  st.doc->displayPageSlice(&sdev, st.page_num, prc.dpi, prc.dpi, st.rotation,
-                           false, true, false, prc.crop.x, prc.crop.y,
-                           prc.crop.width, prc.crop.height);
-
-  SplashBitmap *img = sdev.getBitmap();
-
-  auto xim = XCreateImage(st.display,
-                          DefaultVisual(st.display, DefaultScreen(st.display)),
-                          24, ZPixmap, 0, (char *)img->getDataPtr(),
-                          img->getWidth(), img->getHeight(), 32, 0);
+  auto img = st.renderer->render_page(st.page, prc.dpi, prc.dpi, prc.crop.x(),
+                                      prc.crop.y(), prc.crop.width(),
+                                      prc.crop.height());
+  auto xim = XCreateImage(
+      st.display, DefaultVisual(st.display, DefaultScreen(st.display)), 24,
+      ZPixmap, 0, img.data(), img.width(), img.height(), 32, 0);
 
   Pixmap pxm = XCreatePixmap(
-      st.display, DefaultRootWindow(st.display), img->getWidth(),
-      img->getHeight(), DefaultDepth(st.display, DefaultScreen(st.display)));
+      st.display, DefaultRootWindow(st.display), img.width(), img.height(),
+      DefaultDepth(st.display, DefaultScreen(st.display)));
 
   XPutImage(st.display, pxm, DefaultGC(st.display, DefaultScreen(st.display)),
-            xim, 0, 0, 0, 0, img->getWidth(), img->getHeight());
+            xim, 0, 0, 0, 0, img.width(), img.height());
 
   xim->data = NULL;
   XDestroyImage(xim);
@@ -312,48 +255,49 @@ static Pixmap render_pdf_page_to_pixmap(const AppState &st,
   return pxm;
 }
 
-static void copy_pixmap_on_expose_event(const AppState &st,
-                                        const Rectangle &prev,
+static void copy_pixmap_on_expose_event(const AppState &st, const srect &prev,
                                         const XExposeEvent &e) {
   if (st.pdf_pos != prev) {
-    auto diff = subtract(prev, st.pdf_pos);
+    std::vector<srect> diff = subtract(prev, st.pdf_pos);
     for (size_t i = 0; i < diff.size(); ++i) {
-      XClearArea(st.display, st.main, diff[i].x, diff[i].y, diff[i].width,
-                 diff[i].height, False);
+      XClearArea(st.display, st.main, diff[i].x(), diff[i].y(), diff[i].width(),
+                 diff[i].height(), False);
     }
   }
 
-  Rectangle dirty = intersect({e.x, e.y, e.width, e.height}, st.pdf_pos);
+  srect dirty = intersect(srect{e.x, e.y, e.width, e.height}, st.pdf_pos);
   if (!is_invalid(dirty)) {
     XCopyArea(st.display, st.pdf, st.main,
               DefaultGC(st.display, DefaultScreen(st.display)),
-              dirty.x - st.pdf_pos.x, dirty.y - st.pdf_pos.y, dirty.width,
-              dirty.height, dirty.x, dirty.y);
+              dirty.x() - st.pdf_pos.x(), dirty.y() - st.pdf_pos.y(),
+              dirty.width(), dirty.height(), dirty.x(), dirty.y());
 
     const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
-    auto rs = st.selecting ? st.selection.normalized()
-                           : cc.to_screen(st.pdf_selection);
-    if (rs.width > 0 && rs.height > 0) {
-      dirty = intersect({e.x, e.y, e.width, e.height}, rs);
+    srect rs = st.selecting ? st.selection.normalized()
+                            : cc.to_screen(st.pdf_selection);
+    if (rs.width() > 0 && rs.height() > 0) {
+      dirty = intersect(srect{e.x, e.y, e.width, e.height}, rs);
       if (!is_invalid(dirty))
-        XFillRectangle(st.display, st.main, st.selection_gc, dirty.x, dirty.y,
-                       dirty.width, dirty.height);
+        XFillRectangle(st.display, st.main, st.selection_gc, dirty.x(),
+                       dirty.y(), dirty.width(), dirty.height());
     }
   }
 
   if (st.status) {
-    if (is_invalid(intersect({e.x, e.y, e.width, e.height}, st.status_pos)))
+    if (is_invalid(
+            intersect(srect{e.x, e.y, e.width, e.height}, st.status_pos)))
       return;
 
-    XFillRectangle(st.display, st.main, st.status_gc, st.status_pos.x,
-                   st.status_pos.y, st.status_pos.width, st.status_pos.height);
+    XFillRectangle(st.display, st.main, st.status_gc, st.status_pos.x(),
+                   st.status_pos.y(), st.status_pos.width(),
+                   st.status_pos.height());
 
-    string str{st.prompt + st.value + "_"};
+    std::string str{st.prompt + st.value + "_"};
     if (!st.input)
       str = st.prompt;
     Xutf8DrawString(st.display, st.main, st.fset, st.text_gc,
-                    st.status_pos.x + 1,
-                    st.status_pos.y + st.status_pos.height - (st.fbase + 1),
+                    st.status_pos.x() + 1,
+                    st.status_pos.y() + st.status_pos.height() - (st.fbase + 1),
                     str.c_str(), str.size());
   }
 }
@@ -383,145 +327,75 @@ static void force_render_page(AppState &st, bool clear = true) {
   XSendEvent(st.display, st.main, False, ExposureMask, &e);
 }
 
-static void send_expose(const AppState &st, const Rectangle &r) {
+static void send_expose(const AppState &st, const srect &r) {
   XEvent e;
   e.type = Expose;
-  e.xexpose.x = r.x;
-  e.xexpose.y = r.y;
-  e.xexpose.width = r.width;
-  e.xexpose.height = r.height;
+  e.xexpose.x = r.x();
+  e.xexpose.y = r.y();
+  e.xexpose.width = r.width();
+  e.xexpose.height = r.height();
   XSendEvent(st.display, st.main, False, ExposureMask, &e);
 }
 
 static int get_pdf_scroll_diff(const AppState &st, double percent) {
-  if (st.pdf_pos.height < st.main_pos.height)
+  if (st.pdf_pos.height() < st.main_pos.height())
     return 0;
 
-  int sc = st.pdf_pos.height * percent;
+  int sc = st.pdf_pos.height() * percent;
   if (sc > 0)
-    return min(sc, -st.pdf_pos.y);
+    return std::min(sc, -st.pdf_pos.y());
 
-  return -min(-sc, st.pdf_pos.height - st.main_pos.height + st.pdf_pos.y);
-}
-
-static bool find_page_link(AppState &st, const XButtonEvent &e) {
-  unique_ptr<Links> links(st.page->getLinks());
-  if (links->getLinks().empty())
-    return false;
-
-  const CoordConv cc(st.page, st.pdf_pos, true, st.rotation);
-  double ex = cc.to_pdf_x(e.x);
-  double ey = cc.to_pdf_y(e.y);
-
-  for (int i = 0; i < links->getLinks().size(); ++i) {
-    auto link = links->getLinks()[i];
-    auto rect = link->getRect();
-
-    if (ex >= rect.x1 && ex <= rect.x2 && ey >= rect.y1 && ey <= rect.y2) {
-      auto action = link->getAction();
-      if (action->isOk() && action->getKind() == actionGoTo) {
-        unique_ptr<LinkDest> dptr;
-        auto dest = ((LinkGoTo *)action)->getDest();
-
-        if (!dest) {
-          auto name = ((LinkGoTo *)action)->getNamedDest();
-
-          dptr = st.doc->findDest(name);
-          dest = dptr.get();
-        }
-
-        if (dest) {
-          int prev_page = st.page_num;
-
-          if (dest->isPageRef())
-            st.page_num = st.doc->findPage(dest->getPageRef());
-          else
-            st.page_num = dest->getPageNum();
-
-          if (prev_page != st.page_num) {
-            st.page_stack.push({prev_page, st.pdf_pos.y});
-            return true;
-          }
-        }
-      }
-    }
+  // As we scroll down the top decreases from zero, so the srect is actually
+  // getting BIGGER.
+  // TODO Fix this!
+  int h = st.pdf_pos.bottom() + st.pdf_pos.top();
+  if (h <= st.main_pos.height()) {
+    return 0;
   }
-
-  return false;
+  return -std::min(-sc, h - st.main_pos.height());
 }
 
-static void copy_text(AppState &st, bool primary) {
-  TextOutputDev tdev(nullptr, false, 0, false, false);
-
-  st.doc->displayPage(&tdev, st.page_num, 72, 72, st.rotation, false, true,
-                      false);
-
-  const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
-
-  auto sr = st.selection.normalized();
-  auto x1 = cc.to_pdf_x(sr.x);
-  auto y1 = cc.to_pdf_y(sr.y);
-
-  auto x2 = cc.to_pdf_x(sr.x + sr.width);
-  auto y2 = cc.to_pdf_y(sr.y + sr.height);
-
-  if (primary) {
-    st.primary.reset(tdev.getText(x1, y1, x2, y2));
-    XSetSelectionOwner(st.display, XA_PRIMARY, st.main, CurrentTime);
-  } else {
-    st.clipboard.reset(tdev.getText(x1, y1, x2, y2));
-    XSetSelectionOwner(st.display, XInternAtom(st.display, "CLIPBOARD", 0),
-                       st.main, CurrentTime);
-  }
-}
-
-static Rectangle get_status_pos(const AppState &st) {
-  return {0, st.main_pos.height - (st.fheight + 2), st.main_pos.width,
+static srect get_status_pos(const AppState &st) {
+  return {0, st.main_pos.height() - (st.fheight + 2), st.main_pos.width(),
           st.fheight + 2};
 }
 
 static void search_text(AppState &st) {
-  bool backwards = false;
-  bool ignore_case = false;
-  bool whole_words = false;
-  string str = st.value;
-  while (str.back() == '?' || str.back() == '~' || str.back() == '%') {
+  poppler::page::search_direction_enum dir = poppler::page::search_next_result;
+  poppler::case_sensitivity_enum case_search = poppler::case_sensitive;
+  std::string str = st.value;
+  while (str.back() == '?' || str.back() == '~') {
     char flag = str.back();
     if (flag == '?')
-      backwards = true;
+      dir = poppler::page::search_previous_result;
     if (flag == '~')
-      ignore_case = true;
-    if (flag == '%')
-      whole_words = true;
+      case_search = poppler::case_insensitive;
     str.pop_back();
   }
-
-  vector<wchar_t> wstr(str.size());
-  mbstowcs(wstr.data(), str.c_str(), str.size());
-
-  vector<Unicode> search{wstr.begin(), find(wstr.begin(), wstr.end(), 0)};
 
   bool found = false;
   bool whole = false;
   int page = st.page_num;
 
   while (!whole) {
-    TextOutputDev tdev(nullptr, false, 0, false, false);
-
-    st.doc->displayPage(&tdev, page, 72, 72, 0, false, true, false);
-
-    found = tdev.takeText()->findText(search.data(), search.size(),
-                                      !st.searching, true, st.searching, false,
-                                      !ignore_case, backwards, whole_words,
-                                      &st.left, &st.top, &st.right, &st.bottom);
+    st.renderer->render_page(st.page, 72, 72, 0, false, true, false);
+    found = st.page->search(poppler::ustring::from_latin1(str), st.pos, dir,
+                            case_search);
+    /* found = tdev.takeText()->findText(search.data(), search.size(), */
+    /*                                   !st.searching, true, st.searching,
+     * false, */
+    /*                                   !ignore_case, backwards, whole_words,
+     */
+    /*                                   &st.left, &st.top, &st.right,
+     * &st.bottom); */
 
     if (found)
       break;
 
-    if (!backwards && page < st.doc->getNumPages()) {
+    if (dir != poppler::page::search_next_result && page < st.doc->pages()) {
       ++page;
       st.searching = false;
-    } else if (backwards && page > 1) {
+    } else if (dir == poppler::page::search_next_result && page > 1) {
       --page;
       st.searching = false;
     } else {
@@ -533,46 +407,46 @@ static void search_text(AppState &st) {
     if (page != st.page_num) {
       st.page_num = page;
 
-      st.page = st.doc->getPage(st.page_num);
+      st.page = st.doc->create_page(st.page_num);
       (!st.page) &&
-          error("Cannot create page: " + to_string(st.page_num) + ".");
+          error("Cannot create page: " + std::to_string(st.page_num) + ".");
       force_render_page(st);
     }
 
     const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
 
-    st.pdf_selection = {int(st.left), int(st.top), int(st.right - st.left),
-                        int(st.bottom - st.top)};
+    st.pdf_selection = st.pos;
     st.selection = cc.to_screen(st.pdf_selection);
   } else {
-    st.pdf_selection = st.selection = {0, 0, 0, 0};
+    st.pdf_selection = {0, 0, 0, 0};
+    st.selection = {0, 0, 0, 0};
   }
 
   st.searching = found;
 }
 
 struct Args {
-  string fname;
+  std::string fname;
   Window root;
 };
 
 Args parse_args(int argc, char **argv) {
-  string fname = "";
+  std::string fname = "";
   Window root = None;
 
   for (int i = 1; i < argc; ++i) {
-    if (string(argv[i]) == "-w") {
+    if (std::string(argv[i]) == "-w") {
       if (i < argc - 1) {
         root = strtol(argv[++i], NULL, 0);
         (root == 0) && error("Invalid window (-w) value.");
       } else
         error("Missing window (-w) parameter.");
     } else
-      fname = string(argv[i]);
+      fname = std::string(argv[i]);
   }
 
   if (fname == "")
-    error(string("Missing pdf file, usage: ") + argv[0] +
+    error(std::string("Missing pdf file, usage: ") + argv[0] +
           " [-w window] pdf_file.");
 
   return {fname, root};
@@ -585,21 +459,21 @@ int main(int argc, char **argv) {
   try {
     auto args = parse_args(argc, argv);
 
-    string file_name(args.fname);
+    std::string file_name(args.fname);
 
-    GlobalParamsIniter global_params(NULL);
-
-    st.doc.reset(new PDFDoc(
-        std::unique_ptr<GooString>(new GooString(file_name.c_str()))));
-    (!st.doc->isOk()) && error("Error loading specified pdf file.");
+    st.doc = std::unique_ptr<poppler::document>(
+        poppler::document::load_from_file(file_name));
+    st.renderer =
+        std::unique_ptr<poppler::page_renderer>(new poppler::page_renderer());
+    st.renderer->set_render_hints(poppler::page_renderer::antialiasing |
+                                  poppler::page_renderer::text_antialiasing);
 
     st.page_num = 1;
-    st.page = st.doc->getPage(st.page_num);
+    st.page = st.doc->create_page(st.page_num);
     (!st.page) && error("Document has no pages.");
 
-    auto rect = st.page->getCropBox();
-    auto xret =
-        setup_x(rect->x2 - rect->x1, rect->y2 - rect->y1, file_name, args.root);
+    auto rect = st.page->page_rect();
+    auto xret = setup_x(rect.width(), rect.height(), file_name, args.root);
 
     st.display = xret.display;
     st.main = xret.main;
@@ -619,440 +493,386 @@ int main(int argc, char **argv) {
     while (true) {
       XNextEvent(st.display, &event);
 
-      if (event.type == Expose) {
-        auto prev = st.pdf_pos;
-        if (st.pdf == None) {
-          auto prc = get_pdf_render_conf(
-              st.fit_page, st.scrolling_up, st.next_pos_y, st.main_pos, st.page,
-              st.magnifying, st.magnify, st.rotation);
-          st.scrolling_up = false;
-          st.next_pos_y = 0;
-
-          st.pdf = render_pdf_page_to_pixmap(st, prc);
-          st.pdf_pos = prc.pos;
-        }
-        copy_pixmap_on_expose_event(st, prev, event.xexpose);
-      }
-
-      if (event.type == ConfigureNotify) {
-        if (st.main_pos.width != event.xconfigure.width ||
-            st.main_pos.height != event.xconfigure.height) {
-          st.main_pos = {event.xconfigure.x, event.xconfigure.y,
-                         event.xconfigure.width, event.xconfigure.height};
-
-          XClearWindow(st.display, st.main);
-          if (st.pdf != None) {
-            XFreePixmap(st.display, st.pdf);
-            st.pdf = None;
-          }
-
-          st.status_pos = get_status_pos(st);
-        }
-      }
-
-      if (event.type == ClientMessage) {
-        Atom xembed_atom = XInternAtom(st.display, "_XEMBED", False);
-        Atom wmdel_atom = XInternAtom(st.display, "WM_DELETE_WINDOW", False);
-
-        if (event.xclient.message_type == xembed_atom &&
-            event.xclient.format == 32) {
-          if (!st.xembed_init) {
-            force_render_page(st);
-            st.xembed_init = true;
-          }
-        } else if (event.xclient.data.l[0] == (long)wmdel_atom)
-          goto endloop;
-      }
-
       auto render_page_lambda = [&]() {
-        st.page = st.doc->getPage(st.page_num);
+        st.page = st.doc->create_page(st.page_num);
         (!st.page) &&
-            error("Cannot create page: " + to_string(st.page_num) + ".");
+            error("Cannot create page: " + std::to_string(st.page_num) + ".");
         force_render_page(st);
-        st.selection = st.pdf_selection = {0, 0, 0, 0};
+        st.selection = {0, 0, 0, 0};
+        st.pdf_selection = {0, 0, 0, 0};
         st.selecting = false;
       };
 
-      if (event.type == KeyPress) {
-        KeySym ksym;
-        char buf[64];
-        XLookupString(&event.xkey, buf, sizeof(buf), &ksym, NULL);
+      switch(event.type) {
+        case Expose: {
+          auto prev = st.pdf_pos;
+          if (st.pdf == None) {
+            auto prc = get_pdf_render_conf(
+                st.fit_page, st.scrolling_up, st.next_pos_y, st.main_pos, st.page,
+                st.magnifying, st.magnify, st.rotation);
+            st.scrolling_up = false;
+            st.next_pos_y = 0;
 
-        bool status = st.status;
-        for (unsigned i = 0; i < sizeof(shortcuts) / sizeof(Shortcut); ++i) {
-          auto sc = &shortcuts[i];
-          if (!status && sc->ksym == ksym &&
-              (sc->mask == AnyMask || sc->mask == event.xkey.state)) {
-            if (sc->action == QUIT)
-              goto endloop;
+            st.pdf = render_pdf_page_to_pixmap(st, prc);
+            st.pdf_pos = prc.pos; // Add anohter contructor
+          }
+          copy_pixmap_on_expose_event(st, prev, event.xexpose);
+          break;
+        }
 
-            if (sc->action == FIT_PAGE && !st.fit_page) {
-              st.fit_page = true;
+        case ConfigureNotify:
+          if (st.main_pos.width() != event.xconfigure.width ||
+              st.main_pos.height() != event.xconfigure.height) {
+            st.main_pos = {event.xconfigure.x, event.xconfigure.y,
+                           event.xconfigure.width, event.xconfigure.height};
+
+            XClearWindow(st.display, st.main);
+            if (st.pdf != None) {
+              XFreePixmap(st.display, st.pdf);
+              st.pdf = None;
+            }
+
+            st.status_pos = get_status_pos(st);
+          }
+        break;
+
+        case ClientMessage: {
+          Atom xembed_atom = XInternAtom(st.display, "_XEMBED", False);
+          Atom wmdel_atom = XInternAtom(st.display, "WM_DELETE_WINDOW", False);
+
+          if (event.xclient.message_type == xembed_atom &&
+              event.xclient.format == 32) {
+            if (!st.xembed_init) {
               force_render_page(st);
+              st.xembed_init = true;
             }
+          } else if (event.xclient.data.l[0] == (long)wmdel_atom)
+            return 0;
+          break;
+        }
 
-            if (sc->action == FIT_WIDTH && st.fit_page) {
-              st.fit_page = false;
-              force_render_page(st);
-            }
+        case KeyPress: {
+          KeySym ksym;
+          char buf[64];
+          XLookupString(&event.xkey, buf, sizeof(buf), &ksym, NULL);
 
-            if (sc->action == NEXT || (sc->action == PG_DOWN && st.fit_page)) {
-              if (st.page_num < st.doc->getNumPages()) {
-                ++st.page_num;
-                render_page_lambda();
-              }
-            }
+          bool status = st.status;
+          for (unsigned i = 0; i < sizeof(shortcuts) / sizeof(Shortcut); ++i) {
+            auto sc = &shortcuts[i];
+            if (!status && sc->ksym == ksym &&
+                (sc->mask == AnyMask || sc->mask == event.xkey.state)) {
+              switch (sc->action) {
+                case QUIT:
+                  return 0;
+                break;
 
-            if (sc->action == PREV || (sc->action == PG_UP && st.fit_page)) {
-              if (st.page_num > 1) {
-                --st.page_num;
-                render_page_lambda();
-              }
-            }
+                case FIT_PAGE:
+                  if (!st.fit_page) {
+                    st.fit_page = true;
+                    force_render_page(st);
+                  }
+                break;
 
-            if (sc->action == FIRST) {
-              st.page_num = 1;
-              render_page_lambda();
-            }
+                case FIT_WIDTH:
+                  if (st.fit_page) {
+                    st.fit_page = false;
+                    force_render_page(st);
+                  }
+                break;
 
-            if (sc->action == LAST) {
-              st.page_num = st.doc->getNumPages();
-              render_page_lambda();
-            }
+                case DOWN:
+                  if (st.fit_page) {
+                case NEXT:
+                  if (st.page_num < st.doc->pages()) {
+                    ++st.page_num;
+                    render_page_lambda();
+                  }
+                break;
+                  } else {
+                    int diff = get_pdf_scroll_diff(st, -arrow_scroll);
+                    if (diff != 0) {
+                      st.pdf_pos.set_top(st.pdf_pos.y() + diff);
+                      force_render_page(st, false);
+                    } else {
+                      if (st.page_num < st.doc->pages()) {
+                        ++st.page_num;
+                        render_page_lambda();
+                      }
+                    }
+                  }
+                break;
 
-            if (sc->action == DOWN && !st.fit_page) {
-              int diff = get_pdf_scroll_diff(st, -arrow_scroll);
-              if (diff != 0) {
-                st.pdf_pos.y += diff;
-                force_render_page(st, false);
-              }
-            }
+                case UP:
+                  if (st.fit_page) {
+                case PREV:
+                  if (st.page_num > 1) {
+                    --st.page_num;
+                    render_page_lambda();
+                    break;
+                  }
+                break;
+                  } else {
+                    int diff = get_pdf_scroll_diff(st, arrow_scroll);
+                    if (diff != 0) {
+                      st.pdf_pos.set_top(st.pdf_pos.y() + diff);
+                      force_render_page(st, false);
+                    } else {
+                      if (st.page_num > 1) {
+                        st.scrolling_up = true;
+                        --st.page_num;
+                        render_page_lambda();
+                      }
+                    }
+                  }
+                break;
 
-            if (sc->action == UP && !st.fit_page) {
-              int diff = get_pdf_scroll_diff(st, arrow_scroll);
-              if (diff != 0) {
-                st.pdf_pos.y += diff;
-                force_render_page(st, false);
-              }
-            }
-
-            if (sc->action == PG_DOWN && !st.fit_page) {
-              int diff = get_pdf_scroll_diff(st, -page_scroll);
-              if (diff != 0) {
-                st.pdf_pos.y += diff;
-                force_render_page(st, false);
-              } else {
-                if (st.page_num < st.doc->getNumPages()) {
-                  ++st.page_num;
+                case FIRST:
+                  st.page_num = 1;
                   render_page_lambda();
-                }
+                break;
+
+                case LAST:
+                  st.page_num = st.doc->pages();
+                  render_page_lambda();
+                break;
+
+                case BACK:
+                  if (!st.page_stack.empty()) {
+                    auto elem = st.page_stack.top();
+                    st.page_stack.pop();
+
+                    st.page_num = elem.page;
+                    st.next_pos_y = elem.offset;
+                    render_page_lambda();
+                  }
+                break;
+
+                case RELOAD:
+                  st.doc = std::unique_ptr<poppler::document>(
+                      poppler::document::load_from_file(file_name));
+
+                  if (st.page_num > st.doc->pages())
+                    st.page_num = 1;
+
+                  render_page_lambda();
+                break;
+
+                case GOTO_PAGE:
+                  st.status = true;
+                  st.input = true;
+                  st.prompt =
+                    "goto page [1, " + std::to_string(st.doc->pages()) + "]: ";
+                  st.value = "";
+                  send_expose(st, st.status_pos);
+                break;
+
+                case SEARCH:
+                  st.status = true;
+                  st.input = true;
+                  st.prompt = "search: ";
+                  st.value = "";
+                  send_expose(st, st.status_pos);
+                break;
+
+                case PAGE:
+                  st.status = true;
+                  st.input = false;
+                  st.prompt = "page " + std::to_string(st.page_num) + "/" +
+                    std::to_string(st.doc->pages());
+                  st.value = "";
+                  send_expose(st, st.status_pos);
+                break;
+
+                case MAGNIFY:
+                  if (st.pdf_selection.width() > 0 &&
+                      st.pdf_selection.height() > 0) {
+                    st.magnifying = true;
+                    st.magnify = st.pdf_selection;
+                    st.selection = {0, 0, 0, 0};
+                    st.pdf_selection = {0, 0, 0, 0};
+
+                    st.status = true;
+                    st.input = false;
+                    st.prompt = "magnify";
+                    st.value = "";
+
+                    st.pre_mag_y = st.pdf_pos.y();
+                    st.pdf_pos.set_top(0);
+
+                    force_render_page(st);
+                  }
+                break;
+
+                case ROTATE_CW:
+                  st.rotation += 90;
+                  if (st.rotation > 270)
+                    st.rotation = 0;
+                  force_render_page(st, true);
+                break;
+
+                case ROTATE_CCW:
+                  st.rotation -= 90;
+                  if (st.rotation < 0)
+                    st.rotation = 270;
+                  force_render_page(st, true);
+                break;
               }
             }
+          }
 
-            if (sc->action == PG_UP && !st.fit_page) {
-              int diff = get_pdf_scroll_diff(st, page_scroll);
-              if (diff != 0) {
-                st.pdf_pos.y += diff;
-                force_render_page(st, false);
-              } else {
-                if (st.page_num > 1) {
+          if (status) {
+            switch (ksym) {
+              case XK_Escape:
+                st.status = st.searching = false;
+                XClearArea(st.display, st.main, st.status_pos.x(),
+                    st.status_pos.y(), st.status_pos.width(),
+                    st.status_pos.height(), True);
+
+                if (st.magnifying) {
+                  st.magnifying = false;
+                  st.next_pos_y = st.pre_mag_y;
+                  force_render_page(st);
+                }
+              break;
+
+              case XK_BackSpace:
+                if (!st.value.empty()) {
+                  size_t off = 0;
+                  int num = 0;
+                  while (off < st.value.size()) {
+                    num = mblen(st.value.c_str() + off, st.value.size() - off);
+                    off += num;
+                  }
+
+                  while (num-- > 0)
+                    st.value.pop_back();
+
+                  XClearArea(st.display, st.main, st.status_pos.x(),
+                      st.status_pos.y(), st.status_pos.width(),
+                      st.status_pos.height(), True);
+                }
+              break;
+
+              case XK_Return:
+                if (st.prompt.substr(0, 4) == "goto") {
+                  int page;
+                  auto [p, ec] = std::from_chars(
+                      st.value.data(), st.value.data() + st.value.size(), page);
+                  if (ec == std::errc() && page >= 1 && page <= st.doc->pages()) {
+                    st.status = false;
+                    st.page_num = page;
+
+                    XClearArea(st.display, st.main, st.status_pos.x(),
+                        st.status_pos.y(), st.status_pos.width(),
+                        st.status_pos.height(), True);
+                    render_page_lambda();
+                  }
+                }
+
+                if (st.prompt.substr(0, 6) == "search") {
+                  send_expose(st, st.selection.normalized());
+                  search_text(st);
+                  send_expose(st, st.selection.normalized());
+                }
+              break;
+            }
+
+            if (st.input) {
+              std::string s{buf};
+              if (s != "" && !iscntrl((unsigned char)s[0])) {
+                st.value += s;
+                send_expose(st, st.status_pos);
+              }
+            }
+          }
+          break;
+        }
+
+        case ButtonPress:
+          switch (event.xbutton.button) {
+            case Button4:
+              if (st.fit_page) {
+                if (!st.magnifying && st.page_num > 1) {
                   st.scrolling_up = true;
                   --st.page_num;
                   render_page_lambda();
                 }
+              } else {
+                int diff = get_pdf_scroll_diff(st, mouse_scroll);
+                if (diff != 0) {
+                  st.pdf_pos.set_top(st.pdf_pos.y() + diff);
+                  force_render_page(st, false);
+                } else {
+                  if (st.page_num > 1 && !st.magnifying) {
+                    st.scrolling_up = true;
+                    --st.page_num;
+                    render_page_lambda();
+                  }
+                }
               }
-            }
+            break;
 
-            if (sc->action == BACK) {
-              if (!st.page_stack.empty()) {
-                auto elem = st.page_stack.top();
-                st.page_stack.pop();
-
-                st.page_num = elem.page;
-                st.next_pos_y = elem.offset;
-                render_page_lambda();
+            case Button5:
+              if (st.fit_page) {
+                if (!st.magnifying && st.page_num < st.doc->pages()) {
+                  ++st.page_num;
+                  render_page_lambda();
+                }
+              } else {
+                int diff = get_pdf_scroll_diff(st, -mouse_scroll);
+                if (diff != 0) {
+                  st.pdf_pos.set_top(st.pdf_pos.y() + diff);
+                  force_render_page(st, false);
+                } else {
+                  if (st.page_num < st.doc->pages() && !st.magnifying) {
+                    ++st.page_num;
+                    render_page_lambda();
+                  }
+                }
               }
-            }
+            break;
 
-            if (sc->action == RELOAD) {
-              st.doc.reset(new PDFDoc(
-                  unique_ptr<GooString>(new GooString(file_name.c_str()))));
-              (!st.doc->isOk()) && error("Error re-loading pdf file.");
+            case Button1:
+              if (!st.magnifying) {
+                if (event.xbutton.x >= st.pdf_pos.x() &&
+                    event.xbutton.y >= st.pdf_pos.y() &&
+                    event.xbutton.x <= st.pdf_pos.x() + st.pdf_pos.width() &&
+                    event.xbutton.y <= st.pdf_pos.y() + st.pdf_pos.height()) {
+                  const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
+                  st.selection = cc.to_screen(st.pdf_selection);
 
-              if (st.page_num > st.doc->getNumPages())
-                st.page_num = 1;
+                  // Padding needed because of float rounding errors in cc.
+                  send_expose(st, st.selection.normalized().padded(5));
 
-              render_page_lambda();
-            }
-
-            if (sc->action == COPY) {
-              if (st.pdf_selection.width > 0 && st.pdf_selection.height > 0)
-                copy_text(st, false);
-            }
-
-            if (sc->action == GOTO_PAGE) {
-              st.status = true;
-              st.input = true;
-              st.prompt =
-                  "goto page [1, " + to_string(st.doc->getNumPages()) + "]: ";
-              st.value = "";
-              send_expose(st, st.status_pos);
-            }
-
-            if (sc->action == SEARCH) {
-              st.status = true;
-              st.input = true;
-              st.prompt = "search: ";
-              st.value = "";
-              send_expose(st, st.status_pos);
-            }
-
-            if (sc->action == PAGE) {
-              st.status = true;
-              st.input = false;
-              st.prompt = "page " + to_string(st.page_num) + "/" +
-                          to_string(st.doc->getNumPages());
-              st.value = "";
-              send_expose(st, st.status_pos);
-            }
-
-            if (sc->action == MAGNIFY) {
-              if (st.pdf_selection.width > 0 && st.pdf_selection.height > 0) {
-                st.magnifying = true;
-                st.magnify = st.pdf_selection;
-                st.selection = st.pdf_selection = {0, 0, 0, 0};
-
-                st.status = true;
-                st.input = false;
-                st.prompt = "magnify";
-                st.value = "";
-
-                st.pre_mag_y = st.pdf_pos.y;
-                st.pdf_pos.y = 0;
-
-                force_render_page(st);
+                  st.selection = {event.xbutton.x, event.xbutton.y, 0, 0};
+                  st.selecting = true;
+                }
               }
-            }
-
-            if (sc->action == ROTATE_CW) {
-              st.rotation += 90;
-              if (st.rotation > 270)
-                st.rotation = 0;
-              force_render_page(st, true);
-            }
-
-            if (sc->action == ROTATE_CCW) {
-              st.rotation -= 90;
-              if (st.rotation < 0)
-                st.rotation = 270;
-              force_render_page(st, true);
-            }
+            break;
           }
-        }
+        break;
 
-        if (status) {
-          if (ksym == XK_Escape) {
-            st.status = st.searching = false;
-            XClearArea(st.display, st.main, st.status_pos.x, st.status_pos.y,
-                       st.status_pos.width, st.status_pos.height, True);
+        case MotionNotify:
+          if (st.selecting) {
+            auto pr = st.selection.normalized();
 
-            if (st.magnifying) {
-              st.magnifying = false;
-              st.next_pos_y = st.pre_mag_y;
-              force_render_page(st);
-            }
+            st.selection.set_left(st.selection.x());
+            st.selection.set_right(event.xbutton.x);
+            st.selection.set_top(st.selection.y());
+            st.selection.set_bottom(event.xbutton.y);
+
+            auto nr = st.selection.normalized();
+
+            for (auto &r : subtract(pr, nr))
+              send_expose(st, r);
+            for (auto &r : subtract(nr, pr))
+              send_expose(st, r);
           }
-
-          if (ksym == XK_BackSpace) {
-            if (!st.value.empty()) {
-              size_t off = 0;
-              int num = 0;
-              while (off < st.value.size()) {
-                num = mblen(st.value.c_str() + off, st.value.size() - off);
-                off += num;
-              }
-
-              while (num-- > 0)
-                st.value.pop_back();
-
-              XClearArea(st.display, st.main, st.status_pos.x, st.status_pos.y,
-                         st.status_pos.width, st.status_pos.height, True);
-            }
-          }
-
-          if (ksym == XK_Return) {
-            if (st.prompt.substr(0, 4) == "goto") {
-              int page;
-              auto [p, ec] = from_chars(
-                  st.value.data(), st.value.data() + st.value.size(), page);
-              if (ec == errc() && page >= 1 && page <= st.doc->getNumPages()) {
-                st.status = false;
-                st.page_num = page;
-
-                XClearArea(st.display, st.main, st.status_pos.x,
-                           st.status_pos.y, st.status_pos.width,
-                           st.status_pos.height, True);
-                render_page_lambda();
-              }
-            }
-
-            if (st.prompt.substr(0, 6) == "search") {
-              send_expose(st, st.selection.normalized());
-              search_text(st);
-              send_expose(st, st.selection.normalized());
-            }
-          }
-
-          if (st.input) {
-            string s{buf};
-            if (s != "" && !iscntrl((unsigned char)s[0])) {
-              st.value += s;
-              send_expose(st, st.status_pos);
-            }
-          }
-        }
-      }
-
-      if (event.type == ButtonPress) {
-        auto button = event.xbutton.button;
-        if (button == Button4 && st.fit_page && !st.magnifying) {
-          if (st.page_num > 1) {
-            st.scrolling_up = true;
-            --st.page_num;
-            render_page_lambda();
-          }
-        }
-
-        if (button == Button5 && st.fit_page && !st.magnifying) {
-          if (st.page_num < st.doc->getNumPages()) {
-            ++st.page_num;
-            render_page_lambda();
-          }
-        }
-
-        if (button == Button4 && !st.fit_page) {
-          int diff = get_pdf_scroll_diff(st, mouse_scroll);
-          if (diff != 0) {
-            st.pdf_pos.y += diff;
-            force_render_page(st, false);
-          } else {
-            if (st.page_num > 1 && !st.magnifying) {
-              st.scrolling_up = true;
-              --st.page_num;
-              render_page_lambda();
-            }
-          }
-        }
-
-        if (button == Button5 && !st.fit_page) {
-          int diff = get_pdf_scroll_diff(st, -mouse_scroll);
-          if (diff != 0) {
-            st.pdf_pos.y += diff;
-            force_render_page(st, false);
-          } else {
-            if (st.page_num < st.doc->getNumPages() && !st.magnifying) {
-              ++st.page_num;
-              render_page_lambda();
-            }
-          }
-        }
-
-        if (button == Button1 && !st.magnifying) {
-          if (event.xbutton.x >= st.pdf_pos.x &&
-              event.xbutton.y >= st.pdf_pos.y &&
-              event.xbutton.x <= st.pdf_pos.x + st.pdf_pos.width &&
-              event.xbutton.y <= st.pdf_pos.y + st.pdf_pos.height) {
-            if (find_page_link(st, event.xbutton)) {
-              render_page_lambda();
-            } else {
-              const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
-              st.selection = cc.to_screen(st.pdf_selection);
-
-              // Padding needed because of float rounding errors in cc.
-              send_expose(st, st.selection.normalized().padded(5));
-
-              st.selection = {event.xbutton.x, event.xbutton.y, 0, 0};
-              st.selecting = true;
-            }
-          }
-        }
-      }
-
-      if (event.type == ButtonRelease && event.xbutton.button == Button1) {
-        if (st.selecting) {
-          st.selection.width = event.xbutton.x - st.selection.x;
-          st.selection.height = event.xbutton.y - st.selection.y;
-
-          const CoordConv cc(st.page, st.pdf_pos, false, st.rotation);
-          st.pdf_selection = cc.to_pdf(st.selection.normalized());
-          st.selecting = false;
-
-          copy_text(st, true);
-        }
-      }
-
-      if (event.type == MotionNotify && st.selecting) {
-        auto pr = st.selection.normalized();
-
-        st.selection.width = event.xbutton.x - st.selection.x;
-        st.selection.height = event.xbutton.y - st.selection.y;
-
-        auto nr = st.selection.normalized();
-
-        for (auto &r : subtract(pr, nr))
-          send_expose(st, r);
-        for (auto &r : subtract(nr, pr))
-          send_expose(st, r);
-      }
-
-      if (event.type == SelectionRequest) {
-        Atom targets_atom = XInternAtom(st.display, "TARGETS", False);
-        Atom utf8_string_atom = XInternAtom(st.display, "UTF8_STRING", False);
-        Atom clipboard_atom = XInternAtom(st.display, "CLIPBOARD", False);
-
-        auto xselreq = event.xselectionrequest;
-
-        XEvent e;
-        e.type = SelectionNotify;
-        e.xselection.requestor = xselreq.requestor;
-        e.xselection.selection = xselreq.selection;
-        e.xselection.target = xselreq.target;
-        e.xselection.time = xselreq.time;
-        e.xselection.property = None;
-
-        if (xselreq.target == targets_atom) {
-          XChangeProperty(xselreq.display, xselreq.requestor, xselreq.property,
-                          XA_ATOM, 32, PropModeReplace,
-                          (unsigned char *)&utf8_string_atom, 1);
-          e.xselection.property = xselreq.property;
-        }
-
-        /*
-         * XA_STRING is not exactly correct for sending utf8 chars but
-         * let's try it anyway, maybe it will work somehow.
-         */
-        if (xselreq.target == utf8_string_atom || xselreq.target == XA_STRING) {
-          GooString *ptr = nullptr;
-          if (xselreq.selection == XA_PRIMARY)
-            ptr = st.primary.get();
-          if (xselreq.selection == clipboard_atom)
-            ptr = st.clipboard.get();
-
-          if (ptr) {
-            XChangeProperty(
-                xselreq.display, xselreq.requestor, xselreq.property,
-                xselreq.target, 8, PropModeReplace,
-                (const unsigned char *)ptr->c_str(), ptr->getLength());
-            e.xselection.property = xselreq.property;
-          }
-        }
-
-        XSendEvent(xselreq.display, xselreq.requestor, True, EmptyMask, &e);
+        break;
       }
     }
-  endloop:;
-  } catch (exception &e) {
-    cerr << e.what() << endl;
+  } catch (std::exception &e) {
+    std::cerr << e.what() << std::endl;
     cleanup_x(st);
     return EXIT_FAILURE;
   }

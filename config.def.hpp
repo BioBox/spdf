@@ -1,3 +1,38 @@
+
+#include <climits>
+
+#include <X11/Xutil.h>
+#include <X11/keysym.h>
+
+#define AnyMask UINT_MAX
+#define EmptyMask 0
+
+enum Action {
+  QUIT,
+  NEXT,
+  PREV,
+  FIRST,
+  LAST,
+  FIT_PAGE,
+  FIT_WIDTH,
+  DOWN,
+  UP,
+  BACK,
+  RELOAD,
+  GOTO_PAGE,
+  SEARCH,
+  PAGE,
+  MAGNIFY,
+  ROTATE_CW,
+  ROTATE_CCW
+};
+
+struct Shortcut {
+  unsigned mask;
+  KeySym ksym;
+  Action action;
+};
+
 /*
  * Background color, X11 color name (see:
  * https://en.wikipedia.org/wiki/X11_color_names).
@@ -20,11 +55,8 @@ static Shortcut shortcuts[] = {{AnyMask, XK_q, QUIT},
                                {EmptyMask, XK_w, FIT_WIDTH},
                                {EmptyMask, XK_Down, DOWN},
                                {EmptyMask, XK_Up, UP},
-                               {EmptyMask, XK_Page_Down, PG_DOWN},
-                               {EmptyMask, XK_Page_Up, PG_UP},
                                {EmptyMask, XK_b, BACK},
                                {AnyMask, XK_r, RELOAD},
-                               {ControlMask, XK_c, COPY},
                                {AnyMask, XK_g, GOTO_PAGE},
                                {AnyMask, XK_s, SEARCH},
                                {EmptyMask, XK_slash, SEARCH},
